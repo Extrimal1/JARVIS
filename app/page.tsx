@@ -1,6 +1,5 @@
 
 "use client";
-
 import { useEffect, useState } from "react";
 import {
   Activity,
@@ -9,19 +8,49 @@ import {
   CalendarDays,
   Check,
   Clock3,
-  Command,
+  GraduationCap,
+  ListTodo,
   Mic,
   Plus,
   Sparkles,
+  Sunrise,
+  Trash2,
   Wallet,
 } from "lucide-react";
-
-type Task = {
-  id: number;
-  title: string;
-  time: string;
-  done: boolean;
-};
+import Link from "next/link";
+import Sidebar from "@/src/components/Sidebar";
+import { useLocalStorage } from "@/src/hooks/useLocalStorage";
+import { useToday } from "@/src/hooks/useToday";
+import {
+  CALENDAR_STORAGE_KEY,
+  EVENT_TYPE_STYLES,
+  NO_EVENTS,
+  isCalendarEventList,
+} from "@/src/lib/calendar";
+import {
+  collectDeadlines,
+  formatDayShort,
+  formatDaysLeft,
+  openTasks,
+} from "@/src/lib/briefing";
+import {
+  EMPTY_FINANCE,
+  FINANCE_STORAGE_KEY,
+  formatCents,
+  formatSignedCents,
+  isFinanceData,
+  monthLabel,
+} from "@/src/lib/finance";
+import {
+  EMPTY_STUDY,
+  STUDY_STORAGE_KEY,
+  isStudyData,
+} from "@/src/lib/study";
+import {
+  TASKS_STORAGE_KEY,
+  isTaskList,
+  type Task,
+} from "@/src/lib/tasks";
 
 const initialTasks: Task[] = [
   {
@@ -29,18 +58,21 @@ const initialTasks: Task[] = [
     title: "Vererbung in Java wiederholen",
     time: "10:30",
     done: false,
+    priority:"Hoch",
   },
   {
     id: 2,
     title: "Unterlagen für die nächste Vorlesung vorbereiten",
     time: "13:00",
     done: false,
+    priority:"Mittel",
   },
   {
     id: 3,
     title: "Aufgaben für die Woche überprüfen",
     time: "16:30",
     done: true,
+    priority:"Niedrig",
   },
 ];
 
@@ -52,11 +84,65 @@ function getGreeting(hour: number) {
 }
 
 export default function Home() {
-  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const [tasks, setTasks] = useLocalStorage<Task[]>(
+    TASKS_STORAGE_KEY,
+    initialTasks,
+    isTaskList,
+  );
+  const [events, , eventsLoaded] = useLocalStorage(
+    CALENDAR_STORAGE_KEY,
+    NO_EVENTS,
+    isCalendarEventList,
+  );
+  const today = useToday();
+  const todaysEvents =
+    today === null
+      ? null
+      : events
+          .filter((event) => event.date === today)
+          .sort((a, b) => a.start.localeCompare(b.start));
+  const [study, , studyLoaded] = useLocalStorage(
+    STUDY_STORAGE_KEY,
+    EMPTY_STUDY,
+    isStudyData,
+  );
+  const [finance, , financeLoaded] = useLocalStorage(
+    FINANCE_STORAGE_KEY,
+    EMPTY_FINANCE,
+    isFinanceData,
+  );
+  const deadlines =
+    today === null ? null : collectDeadlines(study, today);
+  const briefingTasks = openTasks(tasks);
+  const financeMonthKey = today === null ? "" : today.slice(0, 7);
+  const financeMonthTransactions =
+    financeMonthKey === ""
+      ? []
+      : finance.transactions.filter((transaction) =>
+          transaction.date.startsWith(financeMonthKey),
+        );
+  const financeIncome = financeMonthTransactions
+    .filter((transaction) => transaction.type === "income")
+    .reduce((sum, transaction) => sum + transaction.amount, 0);
+  const financeSpent = financeMonthTransactions
+    .filter((transaction) => transaction.type === "expense")
+    .reduce((sum, transaction) => sum + transaction.amount, 0);
+  const financeMonthLabel =
+    financeMonthKey === ""
+      ? ""
+      : monthLabel({
+          year: Number(financeMonthKey.slice(0, 4)),
+          month: Number(financeMonthKey.slice(5, 7)) - 1,
+        });
   const [command, setCommand] = useState("");
   const [message, setMessage] = useState("");
   const [greeting, setGreeting] = useState("Willkommen.");
   const [currentTime, setCurrentTime] = useState("");
+  const [showTaskForm, setShowTaskForm] = useState(false);
+const [newTaskTitle, setNewTaskTitle] = useState("");
+const [newTaskTime, setNewTaskTime] = useState("");
+const [newTaskPriority, setNewTaskPriority] =
+  useState<Task["priority"]>("Mittel");
 
   useEffect(() => {
     function updateClock() {
@@ -91,68 +177,28 @@ export default function Home() {
   }
 
   function addTask() {
-    const title = window.prompt("Wie lautet die neue Aufgabe?");
+  if (!newTaskTitle.trim()) return;
 
-    if (!title?.trim()) return;
+  const newTask: Task = {
+    id: Date.now(),
+    title: newTaskTitle.trim(),
+    time: newTaskTime || "Keine Frist",
+    done: false,
+    priority: newTaskPriority,
+  };
 
-    setTasks((current) => [
-      ...current,
-      {
-        id: Date.now(),
-        title: title.trim(),
-        time: "Keine Frist",
-        done: false,
-      },
-    ]);
-  }
+  setTasks((current) => [...current, newTask]);
+
+  setNewTaskTitle("");
+  setNewTaskTime("");
+  setNewTaskPriority("Mittel");
+  setShowTaskForm(false);
+}
 
   return (
     <main className="min-h-screen bg-[#080b12] text-slate-100">
-      <div className="mx-auto flex min-h-screen max-w-[1500px]">
-        <aside className="hidden w-64 shrink-0 border-r border-white/[0.07] p-6 md:flex md:flex-col">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-cyan-400/30 bg-cyan-400/10 text-cyan-300">
-              <Command size={22} />
-            </div>
-
-            <div>
-              <div className="font-semibold tracking-[0.18em]">
-                J.A.R.V.I.S.
-              </div>
-              <div className="text-[10px] tracking-[0.22em] text-slate-500">
-                PERSONAL AI
-              </div>
-            </div>
-          </div>
-
-          <nav className="mt-12 space-y-2">
-            <p className="mb-4 text-[10px] uppercase tracking-[0.2em] text-slate-500">
-              Arbeitsbereich
-            </p>
-
-            <NavItem icon={<Activity size={18} />} label="Übersicht" active />
-            <NavItem
-              icon={<BookOpen size={18} />}
-              label="Studium & Wissen"
-            />
-            <NavItem
-              icon={<CalendarDays size={18} />}
-              label="Terminplaner"
-            />
-            <NavItem icon={<Wallet size={18} />} label="Finanzen" />
-          </nav>
-
-          <div className="mt-auto rounded-2xl border border-white/[0.08] bg-white/[0.025] p-4">
-            <div className="flex items-center gap-2 text-sm">
-              <span className="h-2 w-2 rounded-full bg-emerald-400" />
-              System aktiv
-            </div>
-
-            <p className="mt-2 text-xs leading-5 text-slate-500">
-              Oberfläche bereit. KI-Dienste sind noch nicht verbunden.
-            </p>
-          </div>
-        </aside>
+      <div className="mx-auto flex min-h-screen max-w-[1500px] flex-col md:flex-row">
+        <Sidebar />
 
         <section className="min-w-0 flex-1 px-5 py-7 sm:px-8 lg:px-12">
           <header className="flex flex-wrap items-center justify-between gap-4">
@@ -284,8 +330,273 @@ export default function Home() {
             </section>
           </div>
 
+          <section
+            aria-label="Tagesbriefing"
+            className="mt-7 rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6"
+          >
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-cyan-300/[0.08] text-cyan-300">
+                <Sunrise size={19} />
+              </div>
+
+              <div>
+                <h2 className="font-semibold">Tagesbriefing</h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  {today === null
+                    ? "…"
+                    : new Intl.DateTimeFormat("de-DE", {
+                        dateStyle: "long",
+                        timeZone: "UTC",
+                      }).format(new Date(`${today}T12:00:00Z`))}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-4 lg:grid-cols-3">
+              <div className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="flex items-center gap-2 text-sm font-medium text-slate-200">
+                    <CalendarDays size={16} className="text-cyan-300" />
+                    Heute
+                  </h3>
+                  <Link
+                    href="/calendar"
+                    className="shrink-0 text-xs text-slate-500 transition hover:text-cyan-200"
+                  >
+                    Zum Kalender
+                  </Link>
+                </div>
+
+                <div className="mt-3">
+                  {todaysEvents === null || !eventsLoaded ? (
+                    <p className="text-sm text-slate-500">
+                      Termine werden geladen …
+                    </p>
+                  ) : todaysEvents.length === 0 ? (
+                    <p className="text-sm text-slate-500">
+                      Heute stehen keine Termine an.
+                    </p>
+                  ) : (
+                    <ul className="space-y-2.5">
+                      {todaysEvents.slice(0, 5).map((event) => (
+                        <li
+                          key={event.id}
+                          className="flex items-center gap-2.5 text-sm"
+                        >
+                          <span
+                            aria-hidden="true"
+                            className={`h-2 w-2 shrink-0 rounded-full ${EVENT_TYPE_STYLES[event.type].dot}`}
+                          />
+                          <span className="shrink-0 text-xs tabular-nums text-slate-400">
+                            {event.start}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate text-slate-200">
+                            {event.title}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {todaysEvents !== null &&
+                    eventsLoaded &&
+                    todaysEvents.length > 5 && (
+                      <p className="mt-2 text-xs text-slate-500">
+                        + {todaysEvents.length - 5} weitere Termine
+                      </p>
+                    )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="flex items-center gap-2 text-sm font-medium text-slate-200">
+                    <GraduationCap size={16} className="text-cyan-300" />
+                    Deadlines
+                  </h3>
+                  <Link
+                    href="/study"
+                    className="shrink-0 text-xs text-slate-500 transition hover:text-cyan-200"
+                  >
+                    Zum Studium
+                  </Link>
+                </div>
+
+                <div className="mt-3">
+                  {deadlines === null || !studyLoaded ? (
+                    <p className="text-sm text-slate-500">
+                      Deadlines werden geladen …
+                    </p>
+                  ) : deadlines.length === 0 ? (
+                    <p className="text-sm text-slate-500">
+                      Keine anstehenden Prüfungen oder Fristen.
+                    </p>
+                  ) : (
+                    <ul className="space-y-2.5">
+                      {deadlines.slice(0, 5).map((deadline) => (
+                        <li
+                          key={deadline.id}
+                          className="flex items-start gap-2.5 text-sm"
+                        >
+                          <span
+                            className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] ${
+                              deadline.daysLeft < 0
+                                ? "bg-rose-400/10 text-rose-300"
+                                : deadline.daysLeft <= 1
+                                  ? "bg-amber-400/10 text-amber-300"
+                                  : "bg-cyan-300/10 text-cyan-200"
+                            }`}
+                          >
+                            {formatDaysLeft(deadline.daysLeft)}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-slate-200">
+                              {deadline.title}
+                            </span>
+                            <span className="mt-0.5 block truncate text-xs text-slate-500">
+                              {deadline.kind === "exam"
+                                ? "Prüfung"
+                                : "Lernthema"}
+                              {deadline.subject
+                                ? ` · ${deadline.subject}`
+                                : ""}
+                              {" · "}
+                              {formatDayShort(deadline.date)}
+                            </span>
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {deadlines !== null &&
+                    studyLoaded &&
+                    deadlines.length > 5 && (
+                      <p className="mt-2 text-xs text-slate-500">
+                        + {deadlines.length - 5} weitere Deadlines
+                      </p>
+                    )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="flex items-center gap-2 text-sm font-medium text-slate-200">
+                    <ListTodo size={16} className="text-cyan-300" />
+                    Aufgaben
+                  </h3>
+                  <Link
+                    href="#aufgaben"
+                    className="shrink-0 text-xs text-slate-500 transition hover:text-cyan-200"
+                  >
+                    Zu den Aufgaben
+                  </Link>
+                </div>
+
+                <div className="mt-3">
+                  {briefingTasks.length === 0 ? (
+                    <p className="text-sm text-slate-500">
+                      Keine offenen Aufgaben. Stark!
+                    </p>
+                  ) : (
+                    <ul className="space-y-2.5">
+                      {briefingTasks.slice(0, 5).map((task) => (
+                        <li
+                          key={task.id}
+                          className="flex items-center gap-2.5 text-sm"
+                        >
+                          <span
+                            aria-hidden="true"
+                            className={`h-2 w-2 shrink-0 rounded-full ${
+                              task.priority === "Hoch"
+                                ? "bg-rose-400"
+                                : task.priority === "Mittel"
+                                  ? "bg-amber-400"
+                                  : "bg-slate-500"
+                            }`}
+                          />
+                          <span className="min-w-0 flex-1 truncate text-slate-200">
+                            {task.title}
+                          </span>
+                          {task.priority === "Hoch" && (
+                            <span className="shrink-0 rounded-full bg-rose-400/10 px-2 py-0.5 text-[10px] text-rose-300">
+                              Hoch
+                            </span>
+                          )}
+                          <span className="shrink-0 text-xs text-slate-500">
+                            {task.time}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {briefingTasks.length > 5 && (
+                    <p className="mt-2 text-xs text-slate-500">
+                      + {briefingTasks.length - 5} weitere Aufgaben
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-white/[0.05] bg-white/[0.02] px-4 py-3">
+              <Wallet size={17} className="shrink-0 text-cyan-300" />
+
+              <div className="min-w-0 flex-1 text-sm">
+                {!financeLoaded || today === null ? (
+                  <p className="text-slate-500">Finanzen werden geladen …</p>
+                ) : financeMonthTransactions.length === 0 &&
+                  finance.monthlyBudgetCents === 0 ? (
+                  <p className="text-slate-500">
+                    Noch keine Buchungen in diesem Monat.
+                  </p>
+                ) : (
+                  <p className="text-slate-300">
+                    {financeMonthLabel}:{" "}
+                    <span
+                      className={`font-medium tabular-nums ${
+                        financeIncome - financeSpent < 0
+                          ? "text-rose-200"
+                          : "text-cyan-200"
+                      }`}
+                    >
+                      {formatSignedCents(financeIncome - financeSpent)}
+                    </span>{" "}
+                    <span className="text-slate-500">
+                      · Ausgaben {formatCents(financeSpent)}
+                    </span>
+                    {finance.monthlyBudgetCents > 0 && (
+                      <span
+                        className={
+                          financeSpent > finance.monthlyBudgetCents
+                            ? "text-rose-300"
+                            : "text-slate-500"
+                        }
+                      >
+                        {" "}
+                        · Budget {formatCents(financeSpent)} /{" "}
+                        {formatCents(finance.monthlyBudgetCents)}
+                        {financeSpent > finance.monthlyBudgetCents
+                          ? " überschritten"
+                          : ""}
+                      </span>
+                    )}
+                  </p>
+                )}
+              </div>
+
+              <Link
+                href="/finance"
+                className="shrink-0 text-xs text-slate-500 transition hover:text-cyan-200"
+              >
+                Zu den Finanzen
+              </Link>
+            </div>
+          </section>
+
           <div className="mt-7 grid gap-5 lg:grid-cols-[1.3fr_1fr]">
-            <section className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6">
+            <section
+              id="aufgaben"
+              className="scroll-mt-4 rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6"
+            >
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <h2 className="font-semibold">Aufgaben für heute</h2>
@@ -295,56 +606,156 @@ export default function Home() {
                   </p>
                 </div>
 
-                <button
-                  onClick={addTask}
-                  className="flex items-center gap-1 rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-300 transition hover:border-cyan-300/30"
-                >
-                  <Plus size={15} />
-                  Hinzufügen
-                </button>
+              <button
+  onClick={() => setShowTaskForm((current) => !current)}
+  className="flex items-center gap-1 rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-300 transition hover:border-cyan-300/30"
+>
+  <Plus size={15} />
+  Hinzufügen
+</button>
               </div>
 
+{showTaskForm && (
+  <form
+    onSubmit={(event) => {
+      event.preventDefault();
+      addTask();
+    }}
+    className="mb-4 space-y-3 rounded-2xl border border-cyan-300/20 bg-cyan-300/[0.03] p-4"
+  >
+    <label className="block text-xs text-slate-400">
+      Aufgabenname
+      <input
+        value={newTaskTitle}
+        onChange={(event) => setNewTaskTitle(event.target.value)}
+        placeholder="z. B. Java lernen"
+        required
+        className="mt-2 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-sm text-white outline-none focus:border-cyan-300/50"
+      />
+    </label>
+
+    <label className="block text-xs text-slate-400">
+      Uhrzeit (optional)
+      <input
+        type="time"
+        value={newTaskTime}
+        onChange={(event) => setNewTaskTime(event.target.value)}
+        className="mt-2 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-sm text-white outline-none focus:border-cyan-300/50"
+      />
+    </label>
+
+    <label className="block text-xs text-slate-400">
+      Priorität
+      <select
+        value={newTaskPriority}
+        onChange={(event) =>
+          setNewTaskPriority(event.target.value as Task["priority"])
+        }
+        className="mt-2 w-full rounded-xl border border-white/10 bg-[#111827] px-3 py-3 text-sm text-white outline-none focus:border-cyan-300/50"
+      >
+        <option value="Niedrig">Niedrig</option>
+        <option value="Mittel">Mittel</option>
+        <option value="Hoch">Hoch</option>
+      </select>
+    </label>
+
+    <div className="flex gap-2 pt-1">
+      <button
+        type="submit"
+        className="flex-1 rounded-xl bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-cyan-200"
+      >
+        Aufgabe speichern
+      </button>
+
+      <button
+        type="button"
+        onClick={() => setShowTaskForm(false)}
+        className="rounded-xl border border-white/10 px-4 py-3 text-sm text-slate-300 hover:bg-white/5"
+      >
+        Abbrechen
+      </button>
+    </div>
+  </form>
+)}
+
               <div className="mt-5 space-y-2">
-                {tasks.map((task) => (
-                  <button
-                    key={task.id}
-                    onClick={() =>
-                      setTasks((current) =>
-                        current.map((item) =>
-                          item.id === task.id
-                            ? { ...item, done: !item.done }
-                            : item
-                        )
-                      )
-                    }
-                    aria-pressed={task.done}
-                    className="flex w-full items-center gap-3 rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4 text-left transition hover:bg-white/[0.04]"
-                  >
-                    <span
-                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
-                        task.done
-                          ? "border-cyan-300 bg-cyan-300 text-slate-950"
-                          : "border-slate-600"
-                      }`}
-                    >
-                      {task.done && <Check size={13} />}
-                    </span>
+                
+{tasks.map((task) => (
+  <div
+    key={task.id}
+    className="flex items-center gap-3 rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4 transition hover:bg-white/[0.04]"
+  >
+    <button
+      onClick={() =>
+        setTasks((current) =>
+          current.map((item) =>
+            item.id === task.id
+              ? { ...item, done: !item.done }
+              : item
+          )
+        )
+      }
+      aria-label={
+        task.done
+          ? "Aufgabe als offen markieren"
+          : "Aufgabe als erledigt markieren"
+      }
+      aria-pressed={task.done}
+      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+        task.done
+          ? "border-cyan-300 bg-cyan-300 text-slate-950"
+          : "border-slate-600"
+      }`}
+    >
+      {task.done && <Check size={13} />}
+    </button>
 
-                    <span
-                      className={`min-w-0 flex-1 text-sm ${
-                        task.done
-                          ? "text-slate-500 line-through"
-                          : "text-slate-200"
-                      }`}
-                    >
-                      {task.title}
-                    </span>
+    <div className="min-w-0 flex-1">
+      <p
+        className={`text-sm ${
+          task.done
+            ? "text-slate-500 line-through"
+            : "text-slate-200"
+        }`}
+      >
+        {task.title}
+      </p>
 
-                    <span className="shrink-0 text-xs text-slate-500">
-                      {task.time}
-                    </span>
-                  </button>
-                ))}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <span className="text-xs text-slate-500">
+          <Clock3 className="mr-1 inline" size={12} />
+          {task.time}
+        </span>
+
+        <span
+          className={`rounded-full px-2 py-1 text-[10px] ${
+            task.priority === "Hoch"
+              ? "bg-rose-400/10 text-rose-300"
+              : task.priority === "Mittel"
+                ? "bg-amber-400/10 text-amber-300"
+                : "bg-slate-400/10 text-slate-400"
+          }`}
+        >
+          {task.priority}
+        </span>
+      </div>
+    </div>
+
+    <button
+      onClick={() =>
+        setTasks((current) =>
+          current.filter((item) => item.id !== task.id)
+        )
+      }
+      aria-label={`Aufgabe löschen: ${task.title}`}
+      title="Aufgabe löschen"
+      className="shrink-0 rounded-lg p-2 text-slate-500 transition hover:bg-rose-400/10 hover:text-rose-300"
+    >
+      <Trash2 size={16} />
+    </button>
+  </div>
+))}
+
               </div>
             </section>
 
@@ -388,29 +799,6 @@ export default function Home() {
         </section>
       </div>
     </main>
-  );
-}
-
-function NavItem({
-  icon,
-  label,
-  active = false,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  active?: boolean;
-}) {
-  return (
-    <button
-      className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm transition ${
-        active
-          ? "border border-cyan-300/10 bg-cyan-300/10 text-cyan-200"
-          : "text-slate-400 hover:bg-white/[0.04] hover:text-white"
-      }`}
-    >
-      {icon}
-      {label}
-    </button>
   );
 }
 
