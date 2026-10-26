@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import {
   Activity,
   BookOpen,
+  Brain,
   CalendarDays,
   Command,
   Compass,
@@ -21,6 +22,7 @@ const links = [
   { href: "/calendar", label: "Terminplaner", icon: CalendarDays },
   { href: "/finance", label: "Finanzen", icon: Wallet },
   { href: "/lifestyle", label: "Freizeit", icon: Compass },
+  { href: "/memory", label: "Gedächtnis", icon: Brain },
 ];
 
 function Brand({ onNavigate }: { onNavigate?: () => void }) {

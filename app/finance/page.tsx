@@ -19,6 +19,8 @@ import {
 import { BudgetPanel } from "@/src/components/finance/BudgetPanel";
 import { GoalsPanel } from "@/src/components/finance/GoalsPanel";
 import { TransactionForm } from "@/src/components/finance/TransactionForm";
+import { ImportPanel } from "@/src/components/finance/ImportPanel";
+import { AnalysisPanel } from "@/src/components/finance/AnalysisPanel";
 import { useLocalStorage } from "@/src/hooks/useLocalStorage";
 import { useToday } from "@/src/hooks/useToday";
 import {
@@ -26,6 +28,7 @@ import {
   FINANCE_STORAGE_KEY,
   formatCents,
   formatSignedCents,
+  isEuroTransaction,
   isFinanceData,
   lastSixMonths,
   monthKey,
@@ -37,6 +40,11 @@ import {
   type TransactionType,
   type YearMonth,
 } from "@/src/lib/finance";
+import {
+  IMPORT_BATCHES_KEY,
+  isImportBatchMetaList,
+  type ImportBatchMeta,
+} from "@/src/lib/finance/importStore";
 
 const DAY_FORMAT = new Intl.DateTimeFormat("de-DE", {
   dateStyle: "medium",
@@ -77,6 +85,11 @@ export default function FinancePage() {
     EMPTY_FINANCE,
     isFinanceData,
   );
+  const [batches, setBatches] = useLocalStorage<ImportBatchMeta[]>(
+    IMPORT_BATCHES_KEY,
+    [],
+    isImportBatchMetaList,
+  );
   const [month, setMonth] = useState<YearMonth | null>(null);
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -102,11 +115,22 @@ export default function FinancePage() {
     [data.transactions, key],
   );
 
+  /** Euro transactions only: sums never mix in foreign currencies. */
+  const euroMonthTransactions = useMemo(
+    () => monthTransactions.filter(isEuroTransaction),
+    [monthTransactions],
+  );
+
+  const hasNonEuro = useMemo(
+    () => monthTransactions.some((transaction) => !isEuroTransaction(transaction)),
+    [monthTransactions],
+  );
+
   const totals = useMemo(() => {
     let income = 0;
     let expense = 0;
 
-    for (const transaction of monthTransactions) {
+    for (const transaction of euroMonthTransactions) {
       if (transaction.type === "income") {
         income += transaction.amount;
       } else {
@@ -115,12 +139,12 @@ export default function FinancePage() {
     }
 
     return { income, expense, net: income - expense };
-  }, [monthTransactions]);
+  }, [euroMonthTransactions]);
 
   const categoryTotals = useMemo(() => {
     const spentByCategory = new Map<string, number>();
 
-    for (const transaction of monthTransactions) {
+    for (const transaction of euroMonthTransactions) {
       if (transaction.type !== "expense") continue;
 
       spentByCategory.set(
@@ -132,7 +156,7 @@ export default function FinancePage() {
     return [...spentByCategory.entries()]
       .map(([category, spent]) => ({ category, spent }))
       .sort((a, b) => a.category.localeCompare(b.category, "de"));
-  }, [monthTransactions]);
+  }, [euroMonthTransactions]);
 
   const availableCategories = useMemo(() => {
     const categories = new Set(
@@ -165,6 +189,7 @@ export default function FinancePage() {
 
       for (const transaction of data.transactions) {
         if (!transaction.date.startsWith(pastKey)) continue;
+        if (!isEuroTransaction(transaction)) continue;
 
         if (transaction.type === "income") {
           income += transaction.amount;
@@ -224,6 +249,26 @@ export default function FinancePage() {
       transactions: current.transactions.filter((item) => item.id !== id),
     }));
     setDraft(null);
+  }
+
+  function importBatch(rows: Transaction[], batch: ImportBatchMeta) {
+    setData((current) => ({
+      ...current,
+      transactions: [...current.transactions, ...rows],
+    }));
+    setBatches((current) => [...current, batch]);
+  }
+
+  function deleteBatch(batchId: string) {
+    setData((current) => ({
+      ...current,
+      transactions: current.transactions.filter(
+        (item) => item.sourceDocumentId !== batchId,
+      ),
+    }));
+    setBatches((current) =>
+      current.filter((batch) => batch.id !== batchId),
+    );
   }
 
   function saveTotalBudget(cents: number) {
@@ -394,6 +439,14 @@ export default function FinancePage() {
             </div>
           ) : (
             <>
+              {hasNonEuro && (
+                <p className="mt-6 rounded-2xl border border-white/10 bg-white/[0.02] p-3 text-xs leading-5 text-slate-400">
+                  Hinweis: Dieser Monat enthält Buchungen in Fremdwährung. Sie
+                  sind unten aufgeführt, fließen aber mangels Wechselkurs nicht
+                  in die Summen ein.
+                </p>
+              )}
+
               <div className="mt-6 grid gap-4 sm:grid-cols-3">
                 <div className="rounded-2xl border border-white/[0.08] bg-[#0d111b] p-5">
                   <TrendingUp className="text-emerald-300" size={22} />
@@ -518,6 +571,13 @@ export default function FinancePage() {
                             <span className="mt-1 block truncate text-xs text-slate-500">
                               {formatDay(transaction.date)} ·{" "}
                               {transaction.category}
+                              {transaction.currency !== undefined &&
+                              transaction.currency !== "EUR"
+                                ? ` · ${transaction.currency}`
+                                : ""}
+                              {transaction.importStatus === "imported"
+                                ? " · PDF-Import"
+                                : ""}
                               {transaction.note
                                 ? ` · ${transaction.note}`
                                 : ""}
@@ -541,6 +601,21 @@ export default function FinancePage() {
                 </section>
               </div>
 
+              <div className="mt-6 grid gap-5 xl:grid-cols-2">
+                <section className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6">
+                  <ImportPanel
+                    transactions={data.transactions}
+                    displayMonthKey={key}
+                    batches={batches}
+                    onImport={importBatch}
+                    onDeleteBatch={deleteBatch}
+                  />
+                </section>
+
+                <section className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6">
+                  <AnalysisPanel data={data} month={month} />
+                </section>
+              </div>
             </>
           )}
 

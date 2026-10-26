@@ -1,14 +1,16 @@
 
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   ArrowUpRight,
   BookOpen,
+  Brain,
   CalendarDays,
   Check,
   Clock3,
   GraduationCap,
+  Lightbulb,
   ListTodo,
   Mic,
   Plus,
@@ -28,7 +30,6 @@ import {
   isCalendarEventList,
 } from "@/src/lib/calendar";
 import {
-  collectDeadlines,
   formatDayShort,
   formatDaysLeft,
   openTasks,
@@ -51,6 +52,26 @@ import {
   isTaskList,
   type Task,
 } from "@/src/lib/tasks";
+import { buildAssistantContext } from "@/src/lib/assistant/context";
+import {
+  DEFAULT_PREFERENCES,
+  EMPTY_PLACES,
+  EMPTY_PLANS,
+  EMPTY_SAVED,
+  LIFESTYLE_PLACES_KEY,
+  LIFESTYLE_PLANS_KEY,
+  LIFESTYLE_PREFS_KEY,
+  LIFESTYLE_SAVED_KEY,
+  isLifestylePreferences,
+  isOutingPlanList,
+  isPlaceList,
+  isSavedList,
+} from "@/src/lib/lifestyle/types";
+import {
+  MEMORY_STORAGE_KEY,
+  isMemoryEntryList,
+  type MemoryEntry,
+} from "@/src/lib/memory";
 
 const initialTasks: Task[] = [
   {
@@ -84,7 +105,7 @@ function getGreeting(hour: number) {
 }
 
 export default function Home() {
-  const [tasks, setTasks] = useLocalStorage<Task[]>(
+  const [tasks, setTasks, tasksLoaded] = useLocalStorage<Task[]>(
     TASKS_STORAGE_KEY,
     initialTasks,
     isTaskList,
@@ -95,12 +116,6 @@ export default function Home() {
     isCalendarEventList,
   );
   const today = useToday();
-  const todaysEvents =
-    today === null
-      ? null
-      : events
-          .filter((event) => event.date === today)
-          .sort((a, b) => a.start.localeCompare(b.start));
   const [study, , studyLoaded] = useLocalStorage(
     STUDY_STORAGE_KEY,
     EMPTY_STUDY,
@@ -111,29 +126,99 @@ export default function Home() {
     EMPTY_FINANCE,
     isFinanceData,
   );
-  const deadlines =
-    today === null ? null : collectDeadlines(study, today);
-  const briefingTasks = openTasks(tasks);
-  const financeMonthKey = today === null ? "" : today.slice(0, 7);
-  const financeMonthTransactions =
-    financeMonthKey === ""
-      ? []
-      : finance.transactions.filter((transaction) =>
-          transaction.date.startsWith(financeMonthKey),
-        );
-  const financeIncome = financeMonthTransactions
-    .filter((transaction) => transaction.type === "income")
-    .reduce((sum, transaction) => sum + transaction.amount, 0);
-  const financeSpent = financeMonthTransactions
-    .filter((transaction) => transaction.type === "expense")
-    .reduce((sum, transaction) => sum + transaction.amount, 0);
+  const [places, , placesLoaded] = useLocalStorage(
+    LIFESTYLE_PLACES_KEY,
+    EMPTY_PLACES,
+    isPlaceList,
+  );
+  const [savedIds, , savedLoaded] = useLocalStorage(
+    LIFESTYLE_SAVED_KEY,
+    EMPTY_SAVED,
+    isSavedList,
+  );
+  const [plans, , plansLoaded] = useLocalStorage(
+    LIFESTYLE_PLANS_KEY,
+    EMPTY_PLANS,
+    isOutingPlanList,
+  );
+  const [prefs, , prefsLoaded] = useLocalStorage(
+    LIFESTYLE_PREFS_KEY,
+    DEFAULT_PREFERENCES,
+    isLifestylePreferences,
+  );
+  const [memory, , memoryLoaded] = useLocalStorage<MemoryEntry[]>(
+    MEMORY_STORAGE_KEY,
+    [],
+    isMemoryEntryList,
+  );
+
+  const context = useMemo(() => {
+    if (today === null) return null;
+
+    const now = new Date();
+    const pad = (value: number) => String(value).padStart(2, "0");
+
+    return buildAssistantContext({
+      todayISO: today,
+      nowTime: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
+      builtAt: now.toISOString(),
+      tasks,
+      events,
+      study,
+      finance,
+      places,
+      savedIds,
+      plans,
+      prefs,
+      memory,
+      loaded: {
+        tasks: tasksLoaded,
+        events: eventsLoaded,
+        study: studyLoaded,
+        finance: financeLoaded,
+        lifestyle:
+          placesLoaded && savedLoaded && plansLoaded && prefsLoaded,
+        memory: memoryLoaded,
+      },
+    });
+  }, [
+    today,
+    tasks,
+    events,
+    study,
+    finance,
+    places,
+    savedIds,
+    plans,
+    prefs,
+    memory,
+    tasksLoaded,
+    eventsLoaded,
+    studyLoaded,
+    financeLoaded,
+    placesLoaded,
+    savedLoaded,
+    plansLoaded,
+    prefsLoaded,
+    memoryLoaded,
+  ]);
+
+  const todaysEvents = context === null ? null : context.schedule.today;
+  const deadlines = context === null ? null : context.study.deadlines;
+  const briefingTasks =
+    context === null || !tasksLoaded ? openTasks(tasks) : context.tasks.open;
+  const financeSummary =
+    context === null ? null : context.finance.summary;
   const financeMonthLabel =
-    financeMonthKey === ""
+    today === null
       ? ""
       : monthLabel({
-          year: Number(financeMonthKey.slice(0, 4)),
-          month: Number(financeMonthKey.slice(5, 7)) - 1,
+          year: Number(today.slice(0, 4)),
+          month: Number(today.slice(5, 7)) - 1,
         });
+  const financeIncome = financeSummary?.incomeCents ?? 0;
+  const financeSpent = financeSummary?.expenseCents ?? 0;
+  const financeTxCount = financeSummary?.txCount ?? 0;
   const [command, setCommand] = useState("");
   const [message, setMessage] = useState("");
   const [greeting, setGreeting] = useState("Willkommen.");
@@ -543,7 +628,7 @@ const [newTaskPriority, setNewTaskPriority] =
               <div className="min-w-0 flex-1 text-sm">
                 {!financeLoaded || today === null ? (
                   <p className="text-slate-500">Finanzen werden geladen …</p>
-                ) : financeMonthTransactions.length === 0 &&
+                ) : financeTxCount === 0 &&
                   finance.monthlyBudgetCents === 0 ? (
                   <p className="text-slate-500">
                     Noch keine Buchungen in diesem Monat.
@@ -590,6 +675,76 @@ const [newTaskPriority, setNewTaskPriority] =
                 Zu den Finanzen
               </Link>
             </div>
+
+            {context !== null && context.stale.length === 0 && (
+              <div className="mt-4 rounded-2xl border border-white/[0.05] bg-white/[0.02] px-4 py-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="flex items-center gap-2 text-sm font-medium text-slate-200">
+                    <Lightbulb size={16} className="text-cyan-300" />
+                    Hinweise
+                  </h3>
+                  <span className="text-xs text-slate-500">
+                    {context.insights.length}{" "}
+                    {context.insights.length === 1 ? "Hinweis" : "Hinweise"}
+                  </span>
+                </div>
+
+                {context.insights.length === 0 ? (
+                  <p className="mt-2 text-sm text-slate-500">
+                    Keine Hinweise – alles im grünen Bereich.
+                  </p>
+                ) : (
+                  <ul className="mt-3 space-y-2.5">
+                    {context.insights.map((insight) => (
+                      <li
+                        key={insight.id}
+                        className="flex items-start gap-2.5 text-sm"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
+                            insight.severity === "alert"
+                              ? "bg-rose-400"
+                              : insight.severity === "warning"
+                                ? "bg-amber-400"
+                                : "bg-cyan-300"
+                          }`}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <Link
+                            href={insight.href}
+                            className="text-slate-200 transition hover:text-cyan-200"
+                          >
+                            {insight.title}
+                          </Link>
+                          <span className="mt-0.5 block text-xs text-slate-500">
+                            {insight.detail} {insight.reason}
+                          </span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {context !== null &&
+              context.stale.length === 0 &&
+              context.memory.pinned.length > 0 && (
+                <div className="mt-4 flex flex-wrap items-center gap-2 rounded-2xl border border-white/[0.05] bg-white/[0.02] px-4 py-3">
+                  <Brain size={17} className="shrink-0 text-cyan-300" />
+                  <span className="text-xs text-slate-500">Gemerkt:</span>
+                  {context.memory.pinned.slice(0, 5).map((entry) => (
+                    <Link
+                      key={entry.id}
+                      href="/memory"
+                      className="rounded-full border border-white/10 px-2.5 py-1 text-xs text-slate-300 transition hover:border-cyan-300/40 hover:text-cyan-200"
+                    >
+                      {entry.title}
+                    </Link>
+                  ))}
+                </div>
+              )}
           </section>
 
           <div className="mt-7 grid gap-5 lg:grid-cols-[1.3fr_1fr]">

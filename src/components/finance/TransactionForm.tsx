@@ -141,6 +141,23 @@ export function TransactionForm({
       category: fields.category,
       date: fields.date,
       ...(fields.note.trim() === "" ? {} : { note: fields.note.trim() }),
+      // Preserve import linkage when editing an imported transaction.
+      ...(initial?.currency !== undefined ? { currency: initial.currency } : {}),
+      ...(initial?.sourceDocumentId !== undefined
+        ? { sourceDocumentId: initial.sourceDocumentId }
+        : {}),
+      ...(initial?.importStatus !== undefined
+        ? { importStatus: initial.importStatus }
+        : {}),
+      ...(initial?.originalDescription !== undefined
+        ? { originalDescription: initial.originalDescription }
+        : {}),
+      // Remember the parsed title once when the user renames an import.
+      ...(initial !== null &&
+      initial.originalDescription === undefined &&
+      fields.title.trim() !== initial.title
+        ? { originalDescription: initial.title }
+        : {}),
     });
   }
 

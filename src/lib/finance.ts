@@ -12,6 +12,14 @@ export type Transaction = {
   /** Local date as YYYY-MM-DD. */
   date: string;
   note?: string;
+  /** ISO currency code; absent means EUR (all pre-import records). */
+  currency?: string;
+  /** Import batch id for PDF-imported transactions. */
+  sourceDocumentId?: string;
+  /** Absent means manually created. */
+  importStatus?: "manual" | "imported";
+  /** Original parsed description when the user edited the title. */
+  originalDescription?: string;
 };
 
 export type SavingsGoal = {
@@ -44,6 +52,7 @@ export const INCOME_CATEGORIES = [
   "Gehalt",
   "Stipendium",
   "Nebenjob",
+  "Erstattung",
   "Sonstiges",
 ] as const;
 
@@ -55,6 +64,7 @@ export const EXPENSE_CATEGORIES = [
   "Studium",
   "Gesundheit",
   "Abos",
+  "Umbuchung",
   "Sonstiges",
 ] as const;
 
@@ -158,6 +168,16 @@ function isNonNegativeInt(value: unknown): value is number {
   );
 }
 
+/**
+ * True for EUR transactions. Records without a currency field (every
+ * manually created and every pre-import transaction) count as EUR.
+ */
+export function isEuroTransaction(transaction: Transaction): boolean {
+  return (
+    transaction.currency === undefined || transaction.currency === "EUR"
+  );
+}
+
 export function isTransaction(value: unknown): value is Transaction {
   if (!isRecord(value)) return false;
 
@@ -169,7 +189,15 @@ export function isTransaction(value: unknown): value is Transaction {
     typeof value.category === "string" &&
     typeof value.date === "string" &&
     parseISODateLocal(value.date) !== null &&
-    (value.note === undefined || typeof value.note === "string")
+    (value.note === undefined || typeof value.note === "string") &&
+    (value.currency === undefined || typeof value.currency === "string") &&
+    (value.sourceDocumentId === undefined ||
+      typeof value.sourceDocumentId === "string") &&
+    (value.importStatus === undefined ||
+      value.importStatus === "manual" ||
+      value.importStatus === "imported") &&
+    (value.originalDescription === undefined ||
+      typeof value.originalDescription === "string")
   );
 }
 
