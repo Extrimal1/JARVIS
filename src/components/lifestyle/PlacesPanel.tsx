@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { Dispatch, SetStateAction } from "react";
 import {
   Bookmark,
   ExternalLink,
@@ -13,6 +12,7 @@ import {
 } from "lucide-react";
 import { createId } from "@/src/lib/ids";
 import { formatUploadDate } from "@/src/lib/documents";
+import type { RemoteResult } from "@/src/lib/db/useRemoteResource";
 import {
   centsToEuroInput,
   formatCents,
@@ -77,15 +77,23 @@ function distanceOf(
 
 export function PlacesPanel({
   places,
-  setPlaces,
-  loaded,
+  loading,
+  error,
+  onRetry,
+  onCreate,
+  onUpdate,
+  onDelete,
   savedIds,
   onToggleSave,
   center,
 }: {
   places: Place[];
-  setPlaces: Dispatch<SetStateAction<Place[]>>;
-  loaded: boolean;
+  loading: boolean;
+  error: string | null;
+  onRetry: () => void;
+  onCreate: (place: Place) => Promise<RemoteResult<Place>>;
+  onUpdate: (id: string, patch: Partial<Place>) => Promise<RemoteResult<Place>>;
+  onDelete: (id: string) => Promise<unknown>;
   savedIds: string[];
   onToggleSave: (id: string) => void;
   center: GeoPoint | null;
@@ -187,7 +195,7 @@ export function PlacesPanel({
     setConfirmDeleteId(null);
   }
 
-  function savePlace(event: React.FormEvent<HTMLFormElement>) {
+  async function savePlace(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (editing === null) return;
 
@@ -255,36 +263,39 @@ export function PlacesPanel({
         createdAt: now,
         updatedAt: now,
       };
-      setPlaces((current) => [...current, entry]);
+      const result = await onCreate(entry);
+
+      if (!result.ok) {
+        setFormError(`Speichern fehlgeschlagen: ${result.error}`);
+        return;
+      }
     } else {
-      setPlaces((current) =>
-        current.map((item) =>
-          item.id === editing
-            ? {
-                ...item,
-                name: name.trim(),
-                category,
-                address: address.trim(),
-                latitude: lat,
-                longitude: lng,
-                costCents,
-                durationMinutes,
-                setting: setting === "" ? null : setting,
-                openingHours: openingHours.trim(),
-                notes: notes.trim(),
-                updatedAt: now,
-              }
-            : item,
-        ),
-      );
+      const result = await onUpdate(editing, {
+        name: name.trim(),
+        category,
+        address: address.trim(),
+        latitude: lat,
+        longitude: lng,
+        costCents,
+        durationMinutes,
+        setting: setting === "" ? null : setting,
+        openingHours: openingHours.trim(),
+        notes: notes.trim(),
+        updatedAt: now,
+      });
+
+      if (!result.ok) {
+        setFormError(`Speichern fehlgeschlagen: ${result.error}`);
+        return;
+      }
     }
 
     setEditing(null);
     setFormError(null);
   }
 
-  function deletePlace(id: string) {
-    setPlaces((current) => current.filter((item) => item.id !== id));
+  async function deletePlace(id: string) {
+    await onDelete(id);
     setConfirmDeleteId(null);
   }
 
@@ -321,8 +332,23 @@ export function PlacesPanel({
         </button>
       </div>
 
-      {!loaded ? (
+      {loading ? (
         <p className="mt-5 text-sm text-slate-500">Orte werden geladen …</p>
+      ) : error !== null ? (
+        <div
+          role="alert"
+          className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-400/25 bg-rose-400/5 px-4 py-3 text-sm text-rose-200"
+        >
+          <span className="min-w-0 flex-1">
+            Orte konnten nicht geladen werden: {error}
+          </span>
+          <button
+            onClick={onRetry}
+            className="rounded-xl border border-rose-300/30 px-3 py-1.5 text-xs transition hover:bg-rose-400/10"
+          >
+            Erneut versuchen
+          </button>
+        </div>
       ) : (
         <>
           <div className="mt-5 flex flex-wrap items-center gap-2">

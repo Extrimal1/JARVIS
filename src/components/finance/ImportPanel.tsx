@@ -12,8 +12,13 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useLocalStorage } from "@/src/hooks/useLocalStorage";
 import { createId } from "@/src/lib/ids";
+import { CLOUD_ENABLED } from "@/src/lib/db/mode";
+import {
+  useCorrections,
+  type ImportBatchInput,
+} from "@/src/lib/db/useModules";
+import type { RemoteResult } from "@/src/lib/db/useRemoteResource";
 import {
   EXPENSE_CATEGORIES,
   INCOME_CATEGORIES,
@@ -35,26 +40,33 @@ import {
   type CategoryCorrection,
 } from "@/src/lib/finance/categories";
 import {
-  CATEGORY_CORRECTIONS_KEY,
   alreadyImported,
   batchTransactions,
-  deleteImportPdf,
   detectDuplicates,
-  getImportPdf,
-  isCategoryCorrectionList,
   listImportPdfs,
   reviewRowsToTransactions,
-  saveImportPdf,
   type ImportBatchMeta,
   type ReviewRow,
 } from "@/src/lib/finance/importStore";
+
+export type ImportResultPayload = {
+  batch: ImportBatchMeta;
+  imported: number;
+  pdfSaved: boolean;
+};
 
 type ImportPanelProps = {
   transactions: Transaction[];
   displayMonthKey: string;
   batches: ImportBatchMeta[];
-  onImport: (rows: Transaction[], batch: ImportBatchMeta) => void;
-  onDeleteBatch: (batchId: string) => void;
+  onImport: (
+    rows: Transaction[],
+    meta: ImportBatchInput,
+    file: File,
+  ) => Promise<RemoteResult<ImportResultPayload>>;
+  onDeleteBatch: (batchId: string) => unknown;
+  onDownloadPdf: (batchId: string) => Promise<RemoteResult<Blob>>;
+  onDeletePdf: (batchId: string) => Promise<RemoteResult<null>>;
 };
 
 const CURRENCIES = ["EUR", "USD", "GBP", "CHF"] as const;
@@ -101,6 +113,8 @@ export function ImportPanel({
   batches,
   onImport,
   onDeleteBatch,
+  onDownloadPdf,
+  onDeletePdf,
 }: ImportPanelProps) {
   const [stage, setStage] = useState<"idle" | "reading" | "ready">("idle");
   const [dragActive, setDragActive] = useState(false);
@@ -118,15 +132,15 @@ export function ImportPanel({
   const [deletingBatch, setDeletingBatch] = useState<string | null>(null);
   const [deletingPdf, setDeletingPdf] = useState<string | null>(null);
   const [pdfIds, setPdfIds] = useState<Set<string>>(new Set());
-  const [corrections, setCorrections] = useLocalStorage<CategoryCorrection[]>(
-    CATEGORY_CORRECTIONS_KEY,
-    [],
-    isCategoryCorrectionList,
-  );
+  const [pdfMissing, setPdfMissing] = useState<Set<string>>(new Set());
+  const correctionsStore = useCorrections();
+  const corrections = correctionsStore.data;
   const fileRef = useRef<File | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   async function reloadPdfIds() {
+    if (CLOUD_ENABLED) return;
+
     try {
       const list = await listImportPdfs();
       setPdfIds(new Set(list.map((item) => item.id)));
@@ -394,26 +408,32 @@ export function ImportPanel({
       }
 
       if (changed) {
-        setCorrections(next.slice(-200));
+        await correctionsStore.save(next.slice(-200));
       }
 
-      try {
-        await saveImportPdf(batchId, file);
-      } catch {
+      const result = await onImport(
+        fresh,
+        {
+          id: batchId,
+          fileName: file.name,
+          fileSize: file.size,
+          statementMonth,
+        },
+        file,
+      );
+
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+
+      if (!result.data.pdfSaved) {
         setNotes((current) => [
           ...current,
-          "Das PDF konnte nicht lokal gespeichert werden (Speicher voll?) – die Buchungen wurden trotzdem importiert.",
+          "Das PDF konnte nicht gespeichert werden (Speicher voll?) – die Buchungen wurden trotzdem importiert.",
         ]);
       }
 
-      onImport(fresh, {
-        id: batchId,
-        fileName: file.name,
-        fileSize: file.size,
-        importedAt: new Date().toISOString(),
-        statementMonth,
-        count: fresh.length,
-      });
       void reloadPdfIds();
       const skippedNote =
         skipped > 0
@@ -431,34 +451,34 @@ export function ImportPanel({
   async function downloadPdf(batchId: string) {
     setError(null);
 
-    try {
-      const stored = await getImportPdf(batchId);
+    const batch = batches.find((item) => item.id === batchId);
+    const outcome = await onDownloadPdf(batchId);
 
-      if (stored === null) {
-        setError("Das PDF ist nicht mehr gespeichert (nur die Buchungen bleiben erhalten).");
-        void reloadPdfIds();
-        return;
-      }
-
-      const url = URL.createObjectURL(stored.blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = stored.name;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch {
-      setError("Das PDF konnte nicht geladen werden.");
+    if (!outcome.ok) {
+      setError(outcome.error);
+      return;
     }
+
+    const url = URL.createObjectURL(outcome.data);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = batch?.fileName ?? "kontoauszug.pdf";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   async function removePdf(batchId: string) {
-    try {
-      await deleteImportPdf(batchId);
-    } catch {
-      setError("Das PDF konnte nicht gelöscht werden.");
+    const outcome = await onDeletePdf(batchId);
+
+    if (!outcome.ok) {
+      setError(outcome.error);
       return;
+    }
+
+    if (CLOUD_ENABLED) {
+      setPdfMissing((current) => new Set([...current, batchId]));
     }
 
     setDeletingPdf(null);
@@ -475,8 +495,9 @@ export function ImportPanel({
     <div>
       <h2 className="font-semibold">Kontoauszug importieren</h2>
       <p className="mt-1 text-xs text-slate-500">
-        PDF-Kontoauszug einlesen, prüfen und übernehmen. Alles bleibt lokal in
-        deinem Browser – nichts wird hochgeladen. Max.{" "}
+        PDF-Kontoauszug einlesen, prüfen und übernehmen. Das PDF selbst bleibt
+        lokal in deinem Browser – nur übernommene Buchungen werden gespeichert.
+        Max.{" "}
         {formatBytes(MAX_PDF_SIZE_BYTES)} pro Datei.
       </p>
 
@@ -927,7 +948,9 @@ export function ImportPanel({
           <ul className="mt-3 space-y-2">
             {sortedBatches.map((batch) => {
               const linked = batchTransactions(transactions, batch.id).length;
-              const hasPdf = pdfIds.has(batch.id);
+              const hasPdf = CLOUD_ENABLED
+                ? !pdfMissing.has(batch.id)
+                : pdfIds.has(batch.id);
 
               return (
                 <li
@@ -1024,8 +1047,10 @@ export function ImportPanel({
                         </button>
                         <button
                           onClick={() => {
-                            onDeleteBatch(batch.id);
-                            setDeletingBatch(null);
+                            void (async () => {
+                              await onDeleteBatch(batch.id);
+                              setDeletingBatch(null);
+                            })();
                           }}
                           className="rounded-xl bg-rose-300 px-3 py-1.5 font-medium text-slate-950 transition hover:bg-rose-200"
                         >

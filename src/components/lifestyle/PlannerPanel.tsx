@@ -10,10 +10,10 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useLocalStorage } from "@/src/hooks/useLocalStorage";
 import { useToday } from "@/src/hooks/useToday";
 import { createId } from "@/src/lib/ids";
 import { parseISODateLocal } from "@/src/lib/calendar";
+import { usePlans } from "@/src/lib/db/useModules";
 import {
   centsToEuroInput,
   formatCents,
@@ -21,11 +21,8 @@ import {
 } from "@/src/lib/finance";
 import {
   CATEGORY_LABELS,
-  EMPTY_PLANS,
-  LIFESTYLE_PLANS_KEY,
   PLACE_CATEGORIES,
   formatDayMedium,
-  isOutingPlanList,
   type OutingPlan,
   type OutingStop,
   type Place,
@@ -33,11 +30,8 @@ import {
 } from "@/src/lib/lifestyle/types";
 
 export function PlannerPanel({ places }: { places: Place[] }) {
-  const [plans, setPlans, loaded] = useLocalStorage(
-    LIFESTYLE_PLANS_KEY,
-    EMPTY_PLANS,
-    isOutingPlanList,
-  );
+  const plansStore = usePlans();
+  const plans = plansStore.items;
   const today = useToday();
   const [editing, setEditing] = useState<"new" | string | null>(null);
   const [title, setTitle] = useState("");
@@ -147,7 +141,7 @@ export function PlannerPanel({ places }: { places: Place[] }) {
     setStops((current) => current.filter((_, i) => i !== index));
   }
 
-  function savePlan(event: React.FormEvent<HTMLFormElement>) {
+  async function savePlan(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (editing === null) return;
 
@@ -195,33 +189,36 @@ export function PlannerPanel({ places }: { places: Place[] }) {
         createdAt: now,
         updatedAt: now,
       };
-      setPlans((current) => [...current, entry]);
+      const result = await plansStore.create(entry);
+
+      if (!result.ok) {
+        setFormError(`Speichern fehlgeschlagen: ${result.error}`);
+        return;
+      }
     } else {
-      setPlans((current) =>
-        current.map((item) =>
-          item.id === editing
-            ? {
-                ...item,
-                title: title.trim(),
-                date,
-                durationMinutes,
-                budgetCents,
-                categories,
-                stops,
-                notes: notes.trim(),
-                updatedAt: now,
-              }
-            : item,
-        ),
-      );
+      const result = await plansStore.update(editing, {
+        title: title.trim(),
+        date,
+        durationMinutes,
+        budgetCents,
+        categories,
+        stops,
+        notes: notes.trim(),
+        updatedAt: now,
+      });
+
+      if (!result.ok) {
+        setFormError(`Speichern fehlgeschlagen: ${result.error}`);
+        return;
+      }
     }
 
     setEditing(null);
     setFormError(null);
   }
 
-  function deletePlan(id: string) {
-    setPlans((current) => current.filter((item) => item.id !== id));
+  async function deletePlan(id: string) {
+    await plansStore.remove(id);
     setConfirmDeleteId(null);
   }
 
@@ -262,8 +259,23 @@ export function PlannerPanel({ places }: { places: Place[] }) {
         </button>
       </div>
 
-      {!loaded ? (
+      {plansStore.loading ? (
         <p className="mt-5 text-sm text-slate-500">Pläne werden geladen …</p>
+      ) : plansStore.error !== null ? (
+        <div
+          role="alert"
+          className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-400/25 bg-rose-400/5 px-4 py-3 text-sm text-rose-200"
+        >
+          <span className="min-w-0 flex-1">
+            Pläne konnten nicht geladen werden: {plansStore.error}
+          </span>
+          <button
+            onClick={() => void plansStore.refresh()}
+            className="rounded-xl border border-rose-300/30 px-3 py-1.5 text-xs transition hover:bg-rose-400/10"
+          >
+            Erneut versuchen
+          </button>
+        </div>
       ) : (
         <>
           {editing !== null && (

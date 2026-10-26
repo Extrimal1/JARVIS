@@ -34,8 +34,9 @@ import {
   type DocumentKind,
   type DocumentMeta,
   type ExtractionStatus,
-} from "@/src/lib/documents";
+} from "@/src/lib/db/documents";
 import { DocumentPreview } from "@/src/components/study/DocumentPreview";
+import { CLOUD_ENABLED } from "@/src/lib/db/mode";
 
 const STATUS_STYLES: Record<ExtractionStatus, string> = {
   not_processed: "bg-slate-400/10 text-slate-400",
@@ -83,7 +84,7 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
     let cancelled = false;
 
     async function load() {
-      if (!isIndexedDBAvailable()) {
+      if (!CLOUD_ENABLED && !isIndexedDBAvailable()) {
         if (!cancelled) {
           setStatus("unavailable");
         }

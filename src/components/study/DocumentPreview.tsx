@@ -8,7 +8,7 @@ import {
   getDocumentBlob,
   getDocumentText,
   type DocumentMeta,
-} from "@/src/lib/documents";
+} from "@/src/lib/db/documents";
 
 const TEXT_PREVIEW_LIMIT = 50_000;
 

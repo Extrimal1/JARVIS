@@ -1,5 +1,6 @@
 "use client";
 
+import { useRef } from "react";
 import Link from "next/link";
 import { ArrowLeft, Bookmark } from "lucide-react";
 import Sidebar from "@/src/components/Sidebar";
@@ -8,39 +9,31 @@ import { EventsPanel } from "@/src/components/lifestyle/EventsPanel";
 import { PlacesPanel } from "@/src/components/lifestyle/PlacesPanel";
 import { PlannerPanel } from "@/src/components/lifestyle/PlannerPanel";
 import { PreferencesPanel } from "@/src/components/lifestyle/PreferencesPanel";
-import { useLocalStorage } from "@/src/hooks/useLocalStorage";
+import {
+  usePlaces,
+  usePrefs,
+  useSavedIds,
+} from "@/src/lib/db/useModules";
 import {
   CATEGORY_LABELS,
-  DEFAULT_PREFERENCES,
-  EMPTY_PLACES,
-  EMPTY_SAVED,
-  LIFESTYLE_PLACES_KEY,
-  LIFESTYLE_PREFS_KEY,
-  LIFESTYLE_SAVED_KEY,
   formatDistanceKm,
   haversineKm,
-  isLifestylePreferences,
-  isPlaceList,
-  isSavedList,
+  type LifestylePreferences,
+  type Place,
 } from "@/src/lib/lifestyle/types";
 import type { GeoPoint } from "@/src/lib/lifestyle/providers";
 
 export default function LifestylePage() {
-  const [places, setPlaces, placesLoaded] = useLocalStorage(
-    LIFESTYLE_PLACES_KEY,
-    EMPTY_PLACES,
-    isPlaceList,
-  );
-  const [prefs, setPrefs, prefsLoaded] = useLocalStorage(
-    LIFESTYLE_PREFS_KEY,
-    DEFAULT_PREFERENCES,
-    isLifestylePreferences,
-  );
-  const [savedIds, setSavedIds] = useLocalStorage(
-    LIFESTYLE_SAVED_KEY,
-    EMPTY_SAVED,
-    isSavedList,
-  );
+  const placesStore = usePlaces();
+  const places = placesStore.items;
+  const prefsStore = usePrefs();
+  const prefs = prefsStore.data;
+  const savedStore = useSavedIds();
+  const savedIds = savedStore.ids;
+  const placesLoaded = !placesStore.loading;
+  const prefsLoaded = !prefsStore.loading;
+  const prefsPending = useRef<LifestylePreferences | null>(null);
+  const prefsFlushing = useRef(false);
 
   const center: GeoPoint | null =
     prefs.useGeolocation &&
@@ -49,15 +42,48 @@ export default function LifestylePage() {
       ? { latitude: prefs.latitude, longitude: prefs.longitude }
       : null;
 
-  function toggleSave(id: string) {
-    setSavedIds((current) =>
-      current.includes(id)
-        ? current.filter((item) => item !== id)
-        : [...current, id],
-    );
+  async function toggleSave(id: string) {
+    if (savedIds.includes(id)) {
+      await savedStore.unsave(id);
+    } else {
+      await savedStore.save(id);
+    }
+  }
+
+  /** Trailing-flush: rapid slider drags must not lose the last value. */
+  async function savePrefs(next: LifestylePreferences) {
+    prefsPending.current = next;
+
+    if (prefsFlushing.current) return;
+
+    prefsFlushing.current = true;
+
+    try {
+      while (prefsPending.current !== null) {
+        const latest = prefsPending.current;
+        prefsPending.current = null;
+        await prefsStore.save(latest);
+      }
+    } finally {
+      prefsFlushing.current = false;
+    }
+  }
+
+  async function createPlace(place: Place) {
+    return placesStore.create(place);
+  }
+
+  async function updatePlace(id: string, patch: Partial<Place>) {
+    return placesStore.update(id, patch);
+  }
+
+  async function deletePlace(id: string) {
+    await placesStore.remove(id);
+    await savedStore.unsave(id);
   }
 
   const savedPlaces = places.filter((place) => savedIds.includes(place.id));
+  const mode = placesStore.mode;
 
   return (
     <main className="min-h-screen bg-[#080b12] text-slate-100">
@@ -90,8 +116,11 @@ export default function LifestylePage() {
           <div className="mt-8 space-y-5">
             <PreferencesPanel
               prefs={prefs}
-              setPrefs={setPrefs}
-              loaded={prefsLoaded}
+              onSave={(next) => void savePrefs(next)}
+              loading={!prefsLoaded}
+              error={prefsStore.error}
+              onRetry={() => void prefsStore.refresh()}
+              mode={mode}
             />
 
             <DiscoveryPanel
@@ -114,7 +143,10 @@ export default function LifestylePage() {
                 <div>
                   <h2 className="font-semibold">Gemerkte Orte</h2>
                   <p className="mt-1 text-xs leading-5 text-slate-500">
-                    Deine Favoriten für später – lokal gespeichert.
+                    Deine Favoriten für später –{" "}
+                    {mode === "cloud"
+                      ? "geräteübergreifend synchronisiert."
+                      : "lokal gespeichert."}
                   </p>
                   <p className="mt-2 text-xs text-cyan-300">
                     {savedPlaces.length}{" "}
@@ -182,8 +214,12 @@ export default function LifestylePage() {
 
             <PlacesPanel
               places={places}
-              setPlaces={setPlaces}
-              loaded={placesLoaded}
+              loading={!placesLoaded}
+              error={placesStore.error}
+              onRetry={() => void placesStore.refresh()}
+              onCreate={createPlace}
+              onUpdate={updatePlace}
+              onDelete={deletePlace}
               savedIds={savedIds}
               onToggleSave={toggleSave}
               center={center}
@@ -207,7 +243,10 @@ export default function LifestylePage() {
                     Aktiv: Eigene Einträge.
                   </span>{" "}
                   Alle Orte, Veranstaltungen und Pläne auf dieser Seite
-                  stammen von dir und liegen nur lokal in deinem Browser.
+                  stammen von dir und liegen{" "}
+                  {mode === "cloud"
+                    ? "in deinem privaten Cloud-Bereich."
+                    : "nur lokal in deinem Browser."}{" "}
                   Angaben wie Öffnungszeiten oder Preise sind nicht
                   verifiziert – bitte prüfe sie beim Anbieter, bevor du
                   losgehst.
@@ -261,7 +300,8 @@ export default function LifestylePage() {
           </div>
 
           <footer className="py-8 text-center text-xs text-slate-600">
-            J.A.R.V.I.S. · Freizeit · Lokale Speicherung
+            J.A.R.V.I.S. · Freizeit ·{" "}
+            {mode === "cloud" ? "Cloud-Synchronisierung" : "Lokale Speicherung"}
           </footer>
         </section>
       </div>

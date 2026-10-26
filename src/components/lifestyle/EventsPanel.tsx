@@ -9,10 +9,10 @@ import {
   Ticket,
   Trash2,
 } from "lucide-react";
-import { useLocalStorage } from "@/src/hooks/useLocalStorage";
 import { useToday } from "@/src/hooks/useToday";
 import { createId } from "@/src/lib/ids";
 import { formatUploadDate } from "@/src/lib/documents";
+import { usePlaceEvents } from "@/src/lib/db/useModules";
 import {
   parseISODateLocal,
   timeToMinutes,
@@ -24,10 +24,7 @@ import {
 } from "@/src/lib/finance";
 import {
   CATEGORY_LABELS,
-  EMPTY_LIFESTYLE_EVENTS,
-  LIFESTYLE_EVENTS_KEY,
   PLACE_CATEGORIES,
-  isPlaceEventList,
   type EventCategory,
   type PlaceEvent,
 } from "@/src/lib/lifestyle/types";
@@ -56,11 +53,8 @@ const CATEGORY_OPTIONS: { key: "all" | EventCategory; label: string }[] = [
 ];
 
 export function EventsPanel() {
-  const [events, setEvents, loaded] = useLocalStorage(
-    LIFESTYLE_EVENTS_KEY,
-    EMPTY_LIFESTYLE_EVENTS,
-    isPlaceEventList,
-  );
+  const eventsStore = usePlaceEvents();
+  const events = eventsStore.items;
   const today = useToday();
   const [query, setQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<"all" | EventCategory>(
@@ -144,7 +138,7 @@ export function EventsPanel() {
     setConfirmDeleteId(null);
   }
 
-  function saveEvent(form: React.FormEvent<HTMLFormElement>) {
+  async function saveEvent(form: React.FormEvent<HTMLFormElement>) {
     form.preventDefault();
     if (editing === null) return;
 
@@ -209,36 +203,39 @@ export function EventsPanel() {
         createdAt: now,
         updatedAt: now,
       };
-      setEvents((current) => [...current, entry]);
+      const result = await eventsStore.create(entry);
+
+      if (!result.ok) {
+        setFormError(`Speichern fehlgeschlagen: ${result.error}`);
+        return;
+      }
     } else {
-      setEvents((current) =>
-        current.map((item) =>
-          item.id === editing
-            ? {
-                ...item,
-                title: title.trim(),
-                category,
-                venue: venue.trim(),
-                address: address.trim(),
-                date,
-                endDate: endDate === "" ? null : endDate,
-                time,
-                priceCents,
-                bookingUrl: bookingUrl.trim(),
-                notes: notes.trim(),
-                updatedAt: now,
-              }
-            : item,
-        ),
-      );
+      const result = await eventsStore.update(editing, {
+        title: title.trim(),
+        category,
+        venue: venue.trim(),
+        address: address.trim(),
+        date,
+        endDate: endDate === "" ? null : endDate,
+        time,
+        priceCents,
+        bookingUrl: bookingUrl.trim(),
+        notes: notes.trim(),
+        updatedAt: now,
+      });
+
+      if (!result.ok) {
+        setFormError(`Speichern fehlgeschlagen: ${result.error}`);
+        return;
+      }
     }
 
     setEditing(null);
     setFormError(null);
   }
 
-  function deleteEvent(id: string) {
-    setEvents((current) => current.filter((item) => item.id !== id));
+  async function deleteEvent(id: string) {
+    await eventsStore.remove(id);
     setConfirmDeleteId(null);
   }
 
@@ -276,10 +273,25 @@ export function EventsPanel() {
         </button>
       </div>
 
-      {!loaded ? (
+      {eventsStore.loading ? (
         <p className="mt-5 text-sm text-slate-500">
           Veranstaltungen werden geladen …
         </p>
+      ) : eventsStore.error !== null ? (
+        <div
+          role="alert"
+          className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-400/25 bg-rose-400/5 px-4 py-3 text-sm text-rose-200"
+        >
+          <span className="min-w-0 flex-1">
+            Veranstaltungen konnten nicht geladen werden: {eventsStore.error}
+          </span>
+          <button
+            onClick={() => void eventsStore.refresh()}
+            className="rounded-xl border border-rose-300/30 px-3 py-1.5 text-xs transition hover:bg-rose-400/10"
+          >
+            Erneut versuchen
+          </button>
+        </div>
       ) : (
         <>
           <div className="mt-5 flex flex-wrap items-center gap-2">

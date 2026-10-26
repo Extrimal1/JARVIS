@@ -21,15 +21,15 @@ import { GoalsPanel } from "@/src/components/finance/GoalsPanel";
 import { TransactionForm } from "@/src/components/finance/TransactionForm";
 import { ImportPanel } from "@/src/components/finance/ImportPanel";
 import { AnalysisPanel } from "@/src/components/finance/AnalysisPanel";
-import { useLocalStorage } from "@/src/hooks/useLocalStorage";
 import { useToday } from "@/src/hooks/useToday";
 import {
-  EMPTY_FINANCE,
-  FINANCE_STORAGE_KEY,
+  useFinance,
+  type ImportBatchInput,
+} from "@/src/lib/db/useModules";
+import {
   formatCents,
   formatSignedCents,
   isEuroTransaction,
-  isFinanceData,
   lastSixMonths,
   monthKey,
   monthLabel,
@@ -40,11 +40,7 @@ import {
   type TransactionType,
   type YearMonth,
 } from "@/src/lib/finance";
-import {
-  IMPORT_BATCHES_KEY,
-  isImportBatchMetaList,
-  type ImportBatchMeta,
-} from "@/src/lib/finance/importStore";
+
 
 const DAY_FORMAT = new Intl.DateTimeFormat("de-DE", {
   dateStyle: "medium",
@@ -80,16 +76,9 @@ type Draft =
   | { mode: "edit"; transaction: Transaction };
 
 export default function FinancePage() {
-  const [data, setData] = useLocalStorage(
-    FINANCE_STORAGE_KEY,
-    EMPTY_FINANCE,
-    isFinanceData,
-  );
-  const [batches, setBatches] = useLocalStorage<ImportBatchMeta[]>(
-    IMPORT_BATCHES_KEY,
-    [],
-    isImportBatchMetaList,
-  );
+  const financeStore = useFinance();
+  const data = financeStore.data;
+  const batches = financeStore.batches;
   const [month, setMonth] = useState<YearMonth | null>(null);
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -225,89 +214,64 @@ export default function FinancePage() {
     );
   }
 
-  function saveTransaction(transaction: Transaction) {
-    if (draft?.mode === "new") {
-      setData((current) => ({
-        ...current,
-        transactions: [...current.transactions, transaction],
-      }));
-    } else {
-      setData((current) => ({
-        ...current,
-        transactions: current.transactions.map((item) =>
-          item.id === transaction.id ? transaction : item,
-        ),
-      }));
-    }
+  async function saveTransaction(transaction: Transaction) {
+    const result = await financeStore.saveTransaction(transaction);
+
+    if (!result.ok) return;
 
     setDraft(null);
   }
 
-  function deleteTransaction(id: string) {
-    setData((current) => ({
-      ...current,
-      transactions: current.transactions.filter((item) => item.id !== id),
-    }));
+  async function deleteTransaction(id: string) {
+    const result = await financeStore.deleteTransaction(id);
+
+    if (!result.ok) return;
+
     setDraft(null);
   }
 
-  function importBatch(rows: Transaction[], batch: ImportBatchMeta) {
-    setData((current) => ({
-      ...current,
-      transactions: [...current.transactions, ...rows],
-    }));
-    setBatches((current) => [...current, batch]);
+  function importBatch(
+    rows: Transaction[],
+    meta: ImportBatchInput,
+    file: File,
+  ) {
+    return financeStore.importBatch(rows, meta, file);
   }
 
-  function deleteBatch(batchId: string) {
-    setData((current) => ({
-      ...current,
-      transactions: current.transactions.filter(
-        (item) => item.sourceDocumentId !== batchId,
-      ),
-    }));
-    setBatches((current) =>
-      current.filter((batch) => batch.id !== batchId),
-    );
+  async function deleteBatch(batchId: string) {
+    await financeStore.deleteBatch(batchId);
   }
 
-  function saveTotalBudget(cents: number) {
-    setData((current) => ({ ...current, monthlyBudgetCents: cents }));
+  async function downloadBatchPdf(batchId: string) {
+    return financeStore.downloadBatchFile(batchId);
   }
 
-  function saveCategoryBudget(category: string, cents: number) {
-    setData((current) => ({
-      ...current,
-      categoryBudgets: { ...current.categoryBudgets, [category]: cents },
-    }));
+  async function deleteBatchPdf(batchId: string) {
+    return financeStore.deleteBatchFile(batchId);
   }
 
-  function deleteCategoryBudget(category: string) {
-    setData((current) => {
-      const categoryBudgets = { ...current.categoryBudgets };
-      delete categoryBudgets[category];
-      return { ...current, categoryBudgets };
-    });
+  async function saveTotalBudget(cents: number) {
+    await financeStore.saveSettings(cents);
   }
 
-  function addGoal(goal: SavingsGoal) {
-    setData((current) => ({ ...current, goals: [...current.goals, goal] }));
+  async function saveCategoryBudget(category: string, cents: number) {
+    await financeStore.saveCategoryBudget(category, cents);
   }
 
-  function updateGoal(goal: SavingsGoal) {
-    setData((current) => ({
-      ...current,
-      goals: current.goals.map((item) =>
-        item.id === goal.id ? goal : item,
-      ),
-    }));
+  async function deleteCategoryBudget(category: string) {
+    await financeStore.deleteCategoryBudget(category);
   }
 
-  function deleteGoal(id: string) {
-    setData((current) => ({
-      ...current,
-      goals: current.goals.filter((item) => item.id !== id),
-    }));
+  async function addGoal(goal: SavingsGoal) {
+    await financeStore.addGoal(goal);
+  }
+
+  async function updateGoal(goal: SavingsGoal) {
+    await financeStore.updateGoal(goal);
+  }
+
+  async function deleteGoal(id: string) {
+    await financeStore.deleteGoal(id);
   }
 
   return (
@@ -336,6 +300,32 @@ export default function FinancePage() {
               alle Zahlen stammen aus deinen eigenen Buchungen.
             </p>
           </header>
+
+          {financeStore.loading && (
+            <p
+              aria-live="polite"
+              className="mt-8 rounded-2xl border border-white/[0.08] bg-[#0d111b] px-4 py-3 text-sm text-slate-400"
+            >
+              Finanzen werden geladen …
+            </p>
+          )}
+
+          {financeStore.error !== null && (
+            <div
+              role="alert"
+              className="mt-8 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-400/25 bg-rose-400/5 px-4 py-3 text-sm text-rose-200"
+            >
+              <span className="min-w-0 flex-1">
+                Finanzen konnten nicht geladen werden: {financeStore.error}
+              </span>
+              <button
+                onClick={() => void financeStore.refresh()}
+                className="rounded-xl border border-rose-300/30 px-3 py-1.5 text-xs transition hover:bg-rose-400/10"
+              >
+                Erneut versuchen
+              </button>
+            </div>
+          )}
 
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-1 rounded-2xl border border-white/[0.08] bg-[#0d111b] p-1">
@@ -609,6 +599,8 @@ export default function FinancePage() {
                     batches={batches}
                     onImport={importBatch}
                     onDeleteBatch={deleteBatch}
+                    onDownloadPdf={downloadBatchPdf}
+                    onDeletePdf={deleteBatchPdf}
                   />
                 </section>
 
@@ -620,7 +612,10 @@ export default function FinancePage() {
           )}
 
           <footer className="py-8 text-center text-xs text-slate-600">
-            J.A.R.V.I.S. · Finanzen · Lokale Speicherung
+            J.A.R.V.I.S. · Finanzen ·{" "}
+            {financeStore.mode === "cloud"
+              ? "Cloud-Synchronisierung"
+              : "Lokale Speicherung"}
           </footer>
         </section>
       </div>

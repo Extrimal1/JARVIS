@@ -19,17 +19,15 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import Sidebar from "@/src/components/Sidebar";
-import { useLocalStorage } from "@/src/hooks/useLocalStorage";
 import { useToday } from "@/src/hooks/useToday";
+import { useMemory } from "@/src/lib/db/useModules";
 import {
   MEMORY_CATEGORY_LABELS,
   MEMORY_CATEGORIES,
-  MEMORY_STORAGE_KEY,
   activeMemory,
   createMemoryEntry,
   detectSensitiveHint,
   isExpired,
-  isMemoryEntryList,
   needsReview,
   usageOf,
   type MemoryCategory,
@@ -70,7 +68,7 @@ function MemoryForm({
   onClose,
 }: {
   initial: MemoryEntry | null;
-  onSave: (input: FormInput) => string | null;
+  onSave: (input: FormInput) => Promise<string | null>;
   onClose: () => void;
 }) {
   const [title, setTitle] = useState(initial?.title ?? "");
@@ -87,10 +85,16 @@ function MemoryForm({
     [title, content],
   );
 
-  function submit(event: React.FormEvent) {
+  async function submit(event: React.FormEvent) {
     event.preventDefault();
 
-    const failure = onSave({ title, category, content, reviewAt, expiresAt });
+    const failure = await onSave({
+      title,
+      category,
+      content,
+      reviewAt,
+      expiresAt,
+    });
 
     if (failure !== null) {
       setError(failure);
@@ -209,11 +213,8 @@ function MemoryForm({
 }
 
 export default function MemoryPage() {
-  const [entries, setEntries, loaded] = useLocalStorage<MemoryEntry[]>(
-    MEMORY_STORAGE_KEY,
-    [],
-    isMemoryEntryList,
-  );
+  const memoryStore = useMemory();
+  const entries = memoryStore.items;
   const today = useToday();
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("all");
@@ -263,7 +264,7 @@ export default function MemoryPage() {
     };
   }, [entries, today]);
 
-  function saveDraft(input: FormInput): string | null {
+  async function saveDraft(input: FormInput): Promise<string | null> {
     if (input.title.trim() === "" || input.content.trim() === "") {
       return "Titel und Inhalt dürfen nicht leer sein.";
     }
@@ -284,28 +285,23 @@ export default function MemoryPage() {
         return "Eintrag ist ungültig. Prüfe Titel, Inhalt und Daten.";
       }
 
-      setEntries((current) => [...current, created]);
-    } else {
-      const id = draft.id;
-      const now = new Date().toISOString();
+      const result = await memoryStore.create(created);
 
-      setEntries((current) =>
-        current.map((entry) =>
-          entry.id === id
-            ? {
-                ...entry,
-                category: input.category,
-                title: input.title.trim(),
-                content: input.content.trim(),
-                reviewAt:
-                  input.reviewAt === "" ? undefined : input.reviewAt,
-                expiresAt:
-                  input.expiresAt === "" ? undefined : input.expiresAt,
-                updatedAt: now,
-              }
-            : entry,
-        ),
-      );
+      if (!result.ok) {
+        return `Speichern fehlgeschlagen: ${result.error}`;
+      }
+    } else {
+      const result = await memoryStore.update(draft.id, {
+        category: input.category,
+        title: input.title.trim(),
+        content: input.content.trim(),
+        reviewAt: input.reviewAt === "" ? undefined : input.reviewAt,
+        expiresAt: input.expiresAt === "" ? undefined : input.expiresAt,
+      });
+
+      if (!result.ok) {
+        return `Speichern fehlgeschlagen: ${result.error}`;
+      }
     }
 
     setDraft(null);
@@ -313,18 +309,27 @@ export default function MemoryPage() {
     return null;
   }
 
-  function updateEntry(id: string, patch: Partial<MemoryEntry>) {
-    const now = new Date().toISOString();
-
-    setEntries((current) =>
-      current.map((entry) =>
-        entry.id === id ? { ...entry, ...patch, updatedAt: now } : entry,
-      ),
-    );
+  async function updateEntry(
+    id: string,
+    patch: { approved?: boolean; pinned?: boolean; archived?: boolean },
+  ) {
+    await memoryStore.update(id, patch);
   }
 
-  function removeEntry(id: string) {
-    setEntries((current) => current.filter((entry) => entry.id !== id));
+  async function removeEntry(id: string) {
+    const result = await memoryStore.remove(id);
+
+    if (!result.ok) return;
+
+    setPendingDelete(null);
+  }
+
+  async function clearAll() {
+    for (const entry of entries) {
+      await memoryStore.remove(entry.id);
+    }
+
+    setConfirmingClear(false);
     setPendingDelete(null);
   }
 
@@ -362,8 +367,10 @@ export default function MemoryPage() {
               </h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">
                 Vorlieben, Ziele und Notizen, die sich J.A.R.V.I.S. merken
-                soll. Alles bleibt lokal – nichts wird automatisch gespeichert
-                oder geteilt.
+                soll.{" "}
+                {memoryStore.mode === "cloud"
+                  ? "Einträge werden geräteübergreifend synchronisiert – nichts wird automatisch gespeichert oder geteilt."
+                  : "Alles bleibt lokal – nichts wird automatisch gespeichert oder geteilt."}
               </p>
             </div>
 
@@ -466,8 +473,25 @@ export default function MemoryPage() {
             </div>
           )}
 
+          {memoryStore.error !== null && (
+            <div
+              role="alert"
+              className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-400/25 bg-rose-400/5 px-4 py-3 text-sm text-rose-200"
+            >
+              <span className="min-w-0 flex-1">
+                Erinnerungen konnten nicht geladen werden: {memoryStore.error}
+              </span>
+              <button
+                onClick={() => void memoryStore.refresh()}
+                className="rounded-xl border border-rose-300/30 px-3 py-1.5 text-xs transition hover:bg-rose-400/10"
+              >
+                Erneut versuchen
+              </button>
+            </div>
+          )}
+
           <div className="mt-5">
-            {!loaded ? (
+            {memoryStore.loading ? (
               <div className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-10 text-center text-sm text-slate-500">
                 Erinnerungen werden geladen …
               </div>
@@ -699,11 +723,7 @@ export default function MemoryPage() {
                       Abbrechen
                     </button>
                     <button
-                      onClick={() => {
-                        setEntries([]);
-                        setConfirmingClear(false);
-                        setPendingDelete(null);
-                      }}
+                      onClick={() => void clearAll()}
                       className="rounded-xl bg-rose-300 px-3 py-1.5 text-xs font-medium text-slate-950 transition hover:bg-rose-200"
                     >
                       Alle {entries.length} löschen
@@ -715,7 +735,10 @@ export default function MemoryPage() {
           )}
 
           <footer className="py-8 text-center text-xs text-slate-600">
-            J.A.R.V.I.S. · Gedächtnis · Lokale Speicherung
+            J.A.R.V.I.S. · Gedächtnis ·{" "}
+            {memoryStore.mode === "cloud"
+              ? "Cloud-Synchronisierung"
+              : "Lokale Speicherung"}
           </footer>
         </section>
       </div>

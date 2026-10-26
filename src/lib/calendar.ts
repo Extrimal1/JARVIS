@@ -1,7 +1,7 @@
 export type CalendarEventType = "lecture" | "exam" | "personal";
 
 export type CalendarEvent = {
-  id: number;
+  id: string;
   title: string;
   /** Local date as YYYY-MM-DD. */
   date: string;
@@ -129,7 +129,7 @@ export function isCalendarEvent(value: unknown): value is CalendarEvent {
   const item = value as Record<string, unknown>;
 
   return (
-    typeof item.id === "number" &&
+    typeof item.id === "string" &&
     typeof item.title === "string" &&
     typeof item.date === "string" &&
     parseISODateLocal(item.date) !== null &&

@@ -11,6 +11,7 @@ import {
   Command,
   Compass,
   Menu,
+  Mic,
   Wallet,
   X,
 } from "lucide-react";
@@ -23,6 +24,7 @@ const links = [
   { href: "/finance", label: "Finanzen", icon: Wallet },
   { href: "/lifestyle", label: "Freizeit", icon: Compass },
   { href: "/memory", label: "Gedächtnis", icon: Brain },
+  { href: "/lecture", label: "Vorlesungen", icon: Mic },
 ];
 
 function Brand({ onNavigate }: { onNavigate?: () => void }) {

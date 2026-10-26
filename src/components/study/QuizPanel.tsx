@@ -11,15 +11,9 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useLocalStorage } from "@/src/hooks/useLocalStorage";
 import { useLockBodyScroll } from "@/src/hooks/useLockBodyScroll";
-import {
-  EMPTY_QUIZ,
-  QUIZ_STORAGE_KEY,
-  createQuizId,
-  isQuizQuestionList,
-  type QuizQuestion,
-} from "@/src/lib/quiz";
+import { useQuiz } from "@/src/lib/db/useModules";
+import { createQuizId, type QuizQuestion } from "@/src/lib/quiz";
 import type { Entry } from "@/src/lib/study";
 
 type RunState = {
@@ -39,11 +33,8 @@ export function QuizPanel({
   exams: Entry[];
   topics: Entry[];
 }) {
-  const [questions, setQuestions, loaded] = useLocalStorage(
-    QUIZ_STORAGE_KEY,
-    EMPTY_QUIZ,
-    isQuizQuestionList,
-  );
+  const quizStore = useQuiz();
+  const questions = quizStore.items;
   const [subjectFilter, setSubjectFilter] = useState("all");
   const [editing, setEditing] = useState<"new" | string | null>(null);
   const [question, setQuestion] = useState("");
@@ -86,12 +77,12 @@ export function QuizPanel({
     run !== null && run.checked && run.index === run.queue.length - 1;
   const current = run === null ? null : run.queue[run.index] ?? null;
 
-  function examTitle(id: number | null): string | null {
+  function examTitle(id: string | null): string | null {
     if (id === null) return null;
     return exams.find((exam) => exam.id === id)?.title ?? null;
   }
 
-  function topicTitle(id: number | null): string | null {
+  function topicTitle(id: string | null): string | null {
     if (id === null) return null;
     return topics.find((topic) => topic.id === id)?.title ?? null;
   }
@@ -131,7 +122,7 @@ export function QuizPanel({
     );
   }
 
-  function saveQuestion(event: React.FormEvent<HTMLFormElement>) {
+  async function saveQuestion(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (editing === null) return;
 
@@ -164,28 +155,30 @@ export function QuizPanel({
     const entry: QuizQuestion = {
       id: editing === "new" ? createQuizId() : editing,
       subject: qSubject,
-      examId: qExam === "" ? null : Number(qExam),
-      topicId: qTopic === "" ? null : Number(qTopic),
+      examId: qExam === "" ? null : qExam,
+      topicId: qTopic === "" ? null : qTopic,
       question: question.trim(),
       options: kept.map((option) => option.text),
       correctIndex: correct,
       explanation: explanation.trim(),
     };
 
-    if (editing === "new") {
-      setQuestions((current) => [...current, entry]);
-    } else {
-      setQuestions((current) =>
-        current.map((item) => (item.id === entry.id ? entry : item)),
-      );
+    const result =
+      editing === "new"
+        ? await quizStore.create(entry)
+        : await quizStore.update(entry.id, entry);
+
+    if (!result.ok) {
+      setFormError(`Speichern fehlgeschlagen: ${result.error}`);
+      return;
     }
 
     setEditing(null);
     setFormError(null);
   }
 
-  function deleteQuestion(id: string) {
-    setQuestions((current) => current.filter((item) => item.id !== id));
+  async function deleteQuestion(id: string) {
+    await quizStore.remove(id);
     setConfirmDeleteId(null);
   }
 
@@ -271,8 +264,23 @@ export function QuizPanel({
         </div>
       </div>
 
-      {!loaded ? (
+      {quizStore.loading ? (
         <p className="mt-5 text-sm text-slate-500">Fragen werden geladen …</p>
+      ) : quizStore.error !== null ? (
+        <div
+          role="alert"
+          className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-400/25 bg-rose-400/5 px-4 py-3 text-sm text-rose-200"
+        >
+          <span className="min-w-0 flex-1">
+            Fragen konnten nicht geladen werden: {quizStore.error}
+          </span>
+          <button
+            onClick={() => void quizStore.refresh()}
+            className="rounded-xl border border-rose-300/30 px-3 py-1.5 text-xs transition hover:bg-rose-400/10"
+          >
+            Erneut versuchen
+          </button>
+        </div>
       ) : (
         <>
           <div className="mt-5 flex flex-wrap items-center gap-2">

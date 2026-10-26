@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useState } from "react";
@@ -15,34 +14,30 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import Sidebar from "@/src/components/Sidebar";
-import { useLocalStorage } from "@/src/hooks/useLocalStorage";
+import { createId } from "@/src/lib/ids";
 import { useToday } from "@/src/hooks/useToday";
 import { DocumentLibrary } from "@/src/components/study/DocumentLibrary";
 import { QuizPanel } from "@/src/components/study/QuizPanel";
 import { RevisionPanel } from "@/src/components/study/RevisionPanel";
 import { daysBetween, formatDaysLeft } from "@/src/lib/briefing";
 import { markReviewed } from "@/src/lib/revision";
-import {
-  STUDY_STORAGE_KEY,
-  isStudyData,
-  type Entry,
-  type StudyData,
-} from "@/src/lib/study";
+import { useStudy } from "@/src/lib/db/useModules";
+import { type Entry, type StudyData } from "@/src/lib/study";
 
 const initialData: StudyData = {
   subjects: [
     {
-      id: 1,
+      id: "seed-java",
       title: "Programmierung mit Java",
       detail: "Objektorientierte Programmierung",
     },
     {
-      id: 2,
+      id: "seed-mathe",
       title: "Mathematik",
       detail: "Mathematische Grundlagen",
     },
     {
-      id: 3,
+      id: "seed-datenbanken",
       title: "Datenbanken",
       detail: "SQL und relationale Datenbanken",
     },
@@ -99,8 +94,8 @@ function StudySection({
   items: Entry[];
   subjects: Entry[];
   onAdd: (key: SectionKey, entry: Entry) => void;
-  onDelete: (key: SectionKey, id: number) => void;
-  onToggle: (id: number) => void;
+  onDelete: (key: SectionKey, id: string) => void;
+  onToggle: (id: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [name, setName] = useState("");
@@ -108,13 +103,13 @@ function StudySection({
   const [date, setDate] = useState("");
   const [subject, setSubject] = useState("");
 
-  function submit(event: React.FormEvent<HTMLFormElement>) {
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     if (!name.trim()) return;
 
-    onAdd(sectionKey, {
-      id: Date.now(),
+    await onAdd(sectionKey, {
+      id: createId(),
       title: name.trim(),
       detail: detail.trim(),
       ...(date ? { date } : {}),
@@ -348,42 +343,35 @@ function StudySection({
 }
 
 export default function StudyPage() {
-  const [data, setData] = useLocalStorage<StudyData>(
-    STUDY_STORAGE_KEY,
-    initialData,
-    isStudyData,
-  );
+  const studyStore = useStudy(initialData);
+  const data = studyStore.data;
 
-  function addEntry(key: SectionKey, entry: Entry) {
-    setData((current) => ({
-      ...current,
-      [key]: [...current[key], entry],
-    }));
+  async function addEntry(key: SectionKey, entry: Entry) {
+    await studyStore.addEntry(key, entry);
   }
 
-  function deleteEntry(key: SectionKey, id: number) {
-    setData((current) => ({
-      ...current,
-      [key]: current[key].filter((item) => item.id !== id),
-    }));
+  async function deleteEntry(key: SectionKey, id: string) {
+    await studyStore.deleteEntry(key, id);
   }
 
-  function toggleTopic(id: number) {
-    setData((current) => ({
-      ...current,
-      topics: current.topics.map((topic) =>
-        topic.id === id ? { ...topic, done: !topic.done } : topic
-      ),
-    }));
+  async function toggleTopic(id: string) {
+    await studyStore.updateEntry(id, {
+      done: data.topics.find((item) => item.id === id)?.done !== true,
+    });
   }
 
-  function reviewTopic(id: number, todayISO: string) {
-    setData((current) => ({
-      ...current,
-      topics: current.topics.map((topic) =>
-        topic.id === id ? markReviewed(topic, todayISO) : topic,
-      ),
-    }));
+  async function reviewTopic(id: string, todayISO: string) {
+    const topic = data.topics.find((item) => item.id === id);
+
+    if (topic === undefined) return;
+
+    const reviewed = markReviewed(topic, todayISO);
+
+    await studyStore.updateEntry(id, {
+      lastReviewedAt: reviewed.lastReviewedAt,
+      reviewStage: reviewed.reviewStage,
+      done: reviewed.done,
+    });
   }
 
   const today = useToday();
@@ -437,6 +425,32 @@ export default function StudyPage() {
               deinen Lernfortschritt im Blick.
             </p>
           </header>
+
+          {studyStore.loading && (
+            <p
+              aria-live="polite"
+              className="mt-8 rounded-2xl border border-white/[0.08] bg-[#0d111b] px-4 py-3 text-sm text-slate-400"
+            >
+              Studiendaten werden geladen …
+            </p>
+          )}
+
+          {studyStore.error !== null && (
+            <div
+              role="alert"
+              className="mt-8 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-400/25 bg-rose-400/5 px-4 py-3 text-sm text-rose-200"
+            >
+              <span className="min-w-0 flex-1">
+                Studiendaten konnten nicht geladen werden: {studyStore.error}
+              </span>
+              <button
+                onClick={() => void studyStore.refresh()}
+                className="rounded-xl border border-rose-300/30 px-3 py-1.5 text-xs transition hover:bg-rose-400/10"
+              >
+                Erneut versuchen
+              </button>
+            </div>
+          )}
 
           <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <div className="rounded-2xl border border-white/[0.08] bg-[#0d111b] p-5">
@@ -522,7 +536,10 @@ export default function StudyPage() {
           </div>
 
           <footer className="py-8 text-center text-xs text-slate-600">
-            J.A.R.V.I.S. · University Hub · Lokale Speicherung
+            J.A.R.V.I.S. · University Hub ·{" "}
+            {studyStore.mode === "cloud"
+              ? "Cloud-Synchronisierung"
+              : "Lokale Speicherung"}
           </footer>
         </section>
       </div>

@@ -11,15 +11,13 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import Sidebar from "@/src/components/Sidebar";
-import { useLocalStorage } from "@/src/hooks/useLocalStorage";
+import { createId } from "@/src/lib/ids";
 import { useLockBodyScroll } from "@/src/hooks/useLockBodyScroll";
+import { useCalendarEvents } from "@/src/lib/db/useModules";
 import {
-  CALENDAR_STORAGE_KEY,
   EVENT_TYPE_STYLES,
-  NO_EVENTS,
   addDays,
   findConflicts,
-  isCalendarEventList,
   layoutDayEvents,
   minutesToTime,
   parseISODateLocal,
@@ -47,48 +45,47 @@ const FILTERS: { key: FilterKey; label: string }[] = [
 
 type Draft = { mode: "new" | "edit"; event: CalendarEvent };
 
-type ClockSnapshot = {
-  weekStart: Date;
-  todayISO: string;
-  nowMinutes: number;
-};
+type ClockSnapshot = { todayISO: string; nowMinutes: number };
 
 export default function CalendarPage() {
-  const [events, setEvents] = useLocalStorage(
-    CALENDAR_STORAGE_KEY,
-    NO_EVENTS,
-    isCalendarEventList,
-  );
+  const [now, setNow] = useState<Date | null>(null);
+
+  const eventsStore = useCalendarEvents();
+  const events = eventsStore.items;
+
   const [snapshot, setSnapshot] = useState<ClockSnapshot | null>(null);
-  const [weekOffset, setWeekOffset] = useState(0);
+  const [weekStart, setWeekStart] = useState<Date | null>(null);
   const [filter, setFilter] = useState<FilterKey>("all");
   const [draft, setDraft] = useState<Draft | null>(null);
 
   useEffect(() => {
-    const current = new Date();
-    // Mount-gated: prerendered HTML must not depend on the current date.
+    // Mount-gated clock: prerendered HTML must not depend on now.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setSnapshot({
-      weekStart: startOfWeekMonday(current),
-      todayISO: toISODateLocal(current),
-      nowMinutes: current.getHours() * 60 + current.getMinutes(),
-    });
+    setNow(new Date());
+
+    const timer = window.setInterval(() => setNow(new Date()), 30_000);
+
+    return () => window.clearInterval(timer);
   }, []);
 
-  const weekStart = useMemo(
-    () =>
-      snapshot === null
-        ? null
-        : addDays(snapshot.weekStart, weekOffset * 7),
-    [snapshot, weekOffset],
-  );
-  const todayISO = snapshot?.todayISO ?? null;
-  const nowMinutes = snapshot?.nowMinutes ?? 0;
+  useEffect(() => {
+    if (now === null) return;
+
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSnapshot({
+      todayISO: toISODateLocal(now),
+      nowMinutes: now.getHours() * 60 + now.getMinutes(),
+    });
+    setWeekStart((current) => current ?? startOfWeekMonday(now));
+  }, [now]);
 
   const days = useMemo(
     () => (weekStart === null ? [] : weekDays(weekStart)),
     [weekStart],
   );
+
+  const todayISO = snapshot?.todayISO ?? "";
+  const nowMinutes = snapshot?.nowMinutes ?? 0;
 
   const visibleEvents = useMemo(
     () =>
@@ -99,26 +96,41 @@ export default function CalendarPage() {
   );
 
   const weekCounts = useMemo(() => {
-    const inWeek = new Set(days.map((day) => toISODateLocal(day)));
-    const scoped = events.filter((event) => inWeek.has(event.date));
-
-    return {
-      all: scoped.length,
-      lecture: scoped.filter((event) => event.type === "lecture").length,
-      exam: scoped.filter((event) => event.type === "exam").length,
-      personal: scoped.filter((event) => event.type === "personal").length,
+    const counts: Record<FilterKey, number> = {
+      all: 0,
+      lecture: 0,
+      exam: 0,
+      personal: 0,
     };
-  }, [days, events]);
+
+    if (weekStart === null) return counts;
+
+    const from = toISODateLocal(weekStart);
+    const to = toISODateLocal(addDays(weekStart, 6));
+
+    for (const event of events) {
+      if (event.date < from || event.date > to) continue;
+
+      counts.all += 1;
+      counts[event.type] += 1;
+    }
+
+    return counts;
+  }, [events, weekStart]);
+
+  function shiftWeek(direction: -1 | 1) {
+    setWeekStart((current) =>
+      current === null ? current : addDays(current, direction * 7),
+    );
+  }
 
   function goToToday() {
-    setWeekOffset(0);
+    const current = new Date();
+    setNow(current);
+    setWeekStart(startOfWeekMonday(current));
   }
 
-  function shiftWeek(deltaWeeks: number) {
-    setWeekOffset((current) => current + deltaWeeks);
-  }
-
-  function openNew(date: string, start: string, end: string, id: number) {
+  function openNew(date: string, start: string, end: string, id: string) {
     setDraft({
       mode: "new",
       event: {
@@ -127,7 +139,7 @@ export default function CalendarPage() {
         date,
         start,
         end,
-        type: "lecture",
+        type: "personal",
         description: "",
         location: "",
       },
@@ -135,81 +147,103 @@ export default function CalendarPage() {
   }
 
   function openNewDefault() {
-    if (weekStart === null || todayISO === null) return;
+    const base = weekStart ?? new Date();
+    const date = toISODateLocal(base);
+    const start = "09:00";
+    const end = "10:00";
 
-    const showsToday = days.some((day) => toISODateLocal(day) === todayISO);
-    openNew(
-      showsToday ? todayISO : toISODateLocal(weekStart),
-      "09:00",
-      "10:00",
-      Date.now(),
-    );
-  }
-
-  function openEdit(event: CalendarEvent) {
-    setDraft({ mode: "edit", event: { ...event } });
-  }
-
-  function saveDraft(event: CalendarEvent) {
-    if (draft?.mode === "new") {
-      setEvents((current) => [...current, event]);
-    } else {
-      setEvents((current) =>
-        current.map((item) => (item.id === event.id ? event : item)),
-      );
-    }
-
-    setDraft(null);
-  }
-
-  function deleteDraft(id: number) {
-    setEvents((current) => current.filter((item) => item.id !== id));
-    setDraft(null);
+    openNew(date, start, end, createId());
   }
 
   function handleColumnClick(
-    dayISO: string,
+    date: string,
     clientY: number,
-    rectTop: number,
-    rectHeight: number,
-    id: number,
+    top: number,
+    height: number,
+    id: string,
   ) {
-    const minutes = ((clientY - rectTop) / rectHeight) * 24 * 60;
-    const snapped = Math.max(
-      0,
-      Math.min(1410, Math.floor(minutes / 30) * 30),
-    );
-    const start = minutesToTime(snapped);
-    const end = snapped + 60 > 1439 ? "23:59" : minutesToTime(snapped + 60);
-    openNew(dayISO, start, end, id);
+    const ratio = height > 0 ? (clientY - top) / height : 0;
+    const clamped = Math.min(Math.max(ratio, 0), 0.999);
+    const minutes = Math.floor((clamped * 24 * 60) / 30) * 30;
+    const start = minutesToTime(minutes);
+    const end = minutesToTime(minutes + 60);
+
+    openNew(date, start, end, id);
+  }
+
+  function openEdit(event: CalendarEvent) {
+    setDraft({ mode: "edit", event });
+  }
+
+  async function saveDraft(event: CalendarEvent) {
+    const result =
+      draft?.mode === "new"
+        ? await eventsStore.create(event)
+        : await eventsStore.update(event.id, event);
+
+    if (!result.ok) return;
+
+    setDraft(null);
+  }
+
+  async function deleteDraft(id: string) {
+    const result = await eventsStore.remove(id);
+
+    if (!result.ok) return;
+
+    setDraft(null);
   }
 
   return (
-    <main className="min-h-screen bg-[#080b12] text-slate-100">
-      <div className="mx-auto flex min-h-screen max-w-[1500px] flex-col md:flex-row">
+    <main className="min-h-screen bg-[#080d18] text-white">
+      <div className="mx-auto flex max-w-[1400px] gap-6 px-6 py-8">
         <Sidebar />
 
-        <section className="min-w-0 flex-1 px-5 py-7 sm:px-8 lg:px-12">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-2 text-sm text-slate-500 transition hover:text-cyan-200"
-          >
-            <ArrowLeft size={16} />
-            Zur Übersicht
-          </Link>
+        <section className="min-w-0 flex-1">
+          <header className="flex items-center gap-3">
+            <Link
+              href="/"
+              aria-label="Zurück zur Übersicht"
+              className="rounded-xl border border-white/10 p-2.5 text-slate-300 transition hover:bg-white/5 hover:text-white"
+            >
+              <ArrowLeft size={18} />
+            </Link>
 
-          <header className="mt-7">
-            <p className="text-sm tracking-wide text-cyan-300">TERMINPLANER</p>
-
-            <h1 className="mt-2 text-3xl font-semibold sm:text-4xl">Kalender</h1>
-
-            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">
-              Plane Vorlesungen, Prüfungen und persönliche Termine in einer
-              Wochenübersicht.
-            </p>
+            <div>
+              <h1 className="text-xl font-semibold">Terminplaner</h1>
+              <p className="text-sm text-slate-400">
+                Vorlesungen, Prüfungen & persönliche Termine
+              </p>
+            </div>
           </header>
 
-          <div className="mt-8 flex flex-wrap items-center gap-3">
+          {eventsStore.loading && (
+            <p
+              aria-live="polite"
+              className="mt-4 rounded-2xl border border-white/[0.08] bg-[#0d111b] px-4 py-3 text-sm text-slate-400"
+            >
+              Termine werden geladen …
+            </p>
+          )}
+
+          {eventsStore.error !== null && (
+            <div
+              role="alert"
+              className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-400/25 bg-rose-400/5 px-4 py-3 text-sm text-rose-200"
+            >
+              <span className="min-w-0 flex-1">
+                Termine konnten nicht geladen werden: {eventsStore.error}
+              </span>
+              <button
+                onClick={() => void eventsStore.refresh()}
+                className="rounded-xl border border-rose-300/30 px-3 py-1.5 text-xs transition hover:bg-rose-400/10"
+              >
+                Erneut versuchen
+              </button>
+            </div>
+          )}
+
+          <div className="mt-4 flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-1 rounded-2xl border border-white/[0.08] bg-[#0d111b] p-1">
               <button
                 onClick={() => shiftWeek(-1)}
@@ -352,7 +386,7 @@ export default function CalendarPage() {
                             click.clientY,
                             rect.top,
                             rect.height,
-                            Date.now(),
+                            createId(),
                           );
                         }}
                         className={`relative cursor-pointer border-l border-white/[0.06] ${
@@ -438,7 +472,10 @@ export default function CalendarPage() {
           </p>
 
           <footer className="py-8 text-center text-xs text-slate-600">
-            J.A.R.V.I.S. · Terminplaner · Lokale Speicherung
+            J.A.R.V.I.S. · Terminplaner ·{" "}
+            {eventsStore.mode === "cloud"
+              ? "Cloud-Synchronisierung"
+              : "Lokale Speicherung"}
           </footer>
         </section>
       </div>
@@ -472,7 +509,7 @@ function EventForm({
   initial: CalendarEvent;
   allEvents: CalendarEvent[];
   onSave: (event: CalendarEvent) => void;
-  onDelete: (id: number) => void;
+  onDelete: (id: string) => void;
   onClose: () => void;
 }) {
   const [fields, setFields] = useState<CalendarEvent>(initial);
@@ -736,4 +773,3 @@ function EventForm({
     </div>
   );
 }
-

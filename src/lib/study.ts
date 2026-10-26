@@ -1,5 +1,5 @@
 export type Entry = {
-  id: number;
+  id: string;
   title: string;
   detail: string;
   date?: string;
@@ -36,7 +36,7 @@ export function isEntry(value: unknown): value is Entry {
 
   const item = value as Record<string, unknown>;
 
-  return typeof item.id === "number" && typeof item.title === "string";
+  return typeof item.id === "string" && typeof item.title === "string";
 }
 
 export function isEntryList(value: unknown): value is Entry[] {

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import type { Dispatch, SetStateAction } from "react";
 import {
   Heart,
   Home,
@@ -51,12 +50,18 @@ const DURATION_OPTIONS: { value: string; label: string }[] = [
 
 export function PreferencesPanel({
   prefs,
-  setPrefs,
-  loaded,
+  onSave,
+  loading,
+  error,
+  onRetry,
+  mode,
 }: {
   prefs: LifestylePreferences;
-  setPrefs: Dispatch<SetStateAction<LifestylePreferences>>;
-  loaded: boolean;
+  onSave: (next: LifestylePreferences) => void;
+  loading: boolean;
+  error: string | null;
+  onRetry: () => void;
+  mode: "local" | "cloud";
 }) {
   const [budgetInput, setBudgetInput] = useState<string | null>(null);
   const [geoError, setGeoError] = useState<string | null>(null);
@@ -64,7 +69,7 @@ export function PreferencesPanel({
   const [confirmReset, setConfirmReset] = useState(false);
 
   function update(patch: Partial<LifestylePreferences>) {
-    setPrefs((current) => ({ ...current, ...patch }));
+    onSave({ ...prefs, ...patch });
   }
 
   function toggleCategory(category: PlaceCategory) {
@@ -121,16 +126,33 @@ export function PreferencesPanel({
         <div>
           <h2 className="font-semibold">Vorlieben</h2>
           <p className="mt-1 text-xs leading-5 text-slate-500">
-            Diese Angaben steuern Filter und Vorschläge. Alles bleibt lokal
-            gespeichert.
+            Diese Angaben steuern Filter und Vorschläge.{" "}
+            {mode === "cloud"
+              ? "Sie werden geräteübergreifend synchronisiert."
+              : "Alles bleibt lokal gespeichert."}
           </p>
         </div>
       </div>
 
-      {!loaded ? (
+      {loading ? (
         <p className="mt-5 text-sm text-slate-500">
           Vorlieben werden geladen …
         </p>
+      ) : error !== null ? (
+        <div
+          role="alert"
+          className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-400/25 bg-rose-400/5 px-4 py-3 text-sm text-rose-200"
+        >
+          <span className="min-w-0 flex-1">
+            Vorlieben konnten nicht geladen werden: {error}
+          </span>
+          <button
+            onClick={onRetry}
+            className="rounded-xl border border-rose-300/30 px-3 py-1.5 text-xs transition hover:bg-rose-400/10"
+          >
+            Erneut versuchen
+          </button>
+        </div>
       ) : (
         <div className="mt-5 space-y-5">
           <div className="grid gap-4 md:grid-cols-2">
@@ -183,7 +205,7 @@ export function PreferencesPanel({
               )}
               <p className="mt-1.5 text-[11px] leading-4 text-slate-500">
                 Optional: dient nur der Entfernungsberechnung und wird nur
-                mit deiner Zustimmung lokal gespeichert.
+                mit deiner Zustimmung gespeichert.
               </p>
               {geoError !== null && (
                 <p role="alert" className="mt-1.5 text-xs text-rose-300">
@@ -352,7 +374,7 @@ export function PreferencesPanel({
                 </p>
                 <button
                   onClick={() => {
-                    setPrefs(DEFAULT_PREFERENCES);
+                    onSave(DEFAULT_PREFERENCES);
                     setBudgetInput(null);
                     setConfirmReset(false);
                   }}

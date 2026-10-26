@@ -21,75 +21,51 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import Sidebar from "@/src/components/Sidebar";
-import { useLocalStorage } from "@/src/hooks/useLocalStorage";
 import { useToday } from "@/src/hooks/useToday";
-import {
-  CALENDAR_STORAGE_KEY,
-  EVENT_TYPE_STYLES,
-  NO_EVENTS,
-  isCalendarEventList,
-} from "@/src/lib/calendar";
+import { EVENT_TYPE_STYLES } from "@/src/lib/calendar";
 import {
   formatDayShort,
   formatDaysLeft,
   openTasks,
 } from "@/src/lib/briefing";
 import {
-  EMPTY_FINANCE,
-  FINANCE_STORAGE_KEY,
   formatCents,
   formatSignedCents,
-  isFinanceData,
   monthLabel,
 } from "@/src/lib/finance";
-import {
-  EMPTY_STUDY,
-  STUDY_STORAGE_KEY,
-  isStudyData,
-} from "@/src/lib/study";
-import {
-  TASKS_STORAGE_KEY,
-  isTaskList,
-  type Task,
-} from "@/src/lib/tasks";
+import { EMPTY_STUDY } from "@/src/lib/study";
+import { type Task } from "@/src/lib/tasks";
+import { createId } from "@/src/lib/ids";
 import { buildAssistantContext } from "@/src/lib/assistant/context";
 import {
-  DEFAULT_PREFERENCES,
-  EMPTY_PLACES,
-  EMPTY_PLANS,
-  EMPTY_SAVED,
-  LIFESTYLE_PLACES_KEY,
-  LIFESTYLE_PLANS_KEY,
-  LIFESTYLE_PREFS_KEY,
-  LIFESTYLE_SAVED_KEY,
-  isLifestylePreferences,
-  isOutingPlanList,
-  isPlaceList,
-  isSavedList,
-} from "@/src/lib/lifestyle/types";
-import {
-  MEMORY_STORAGE_KEY,
-  isMemoryEntryList,
-  type MemoryEntry,
-} from "@/src/lib/memory";
+  useCalendarEvents,
+  useFinance,
+  useMemory,
+  usePlans,
+  usePlaces,
+  usePrefs,
+  useSavedIds,
+  useStudy,
+  useTasks,
+} from "@/src/lib/db/useModules";
 
 const initialTasks: Task[] = [
   {
-    id: 1,
+    id: "seed-1",
     title: "Vererbung in Java wiederholen",
     time: "10:30",
     done: false,
     priority:"Hoch",
   },
   {
-    id: 2,
+    id: "seed-2",
     title: "Unterlagen für die nächste Vorlesung vorbereiten",
     time: "13:00",
     done: false,
     priority:"Mittel",
   },
   {
-    id: 3,
+    id: "seed-3",
     title: "Aufgaben für die Woche überprüfen",
     time: "16:30",
     done: true,
@@ -105,52 +81,34 @@ function getGreeting(hour: number) {
 }
 
 export default function Home() {
-  const [tasks, setTasks, tasksLoaded] = useLocalStorage<Task[]>(
-    TASKS_STORAGE_KEY,
-    initialTasks,
-    isTaskList,
-  );
-  const [events, , eventsLoaded] = useLocalStorage(
-    CALENDAR_STORAGE_KEY,
-    NO_EVENTS,
-    isCalendarEventList,
-  );
+  const tasksStore = useTasks(initialTasks);
+  const tasks = tasksStore.items;
+  const tasksLoaded = !tasksStore.loading;
+  const eventsStore = useCalendarEvents();
+  const events = eventsStore.items;
+  const eventsLoaded = !eventsStore.loading;
   const today = useToday();
-  const [study, , studyLoaded] = useLocalStorage(
-    STUDY_STORAGE_KEY,
-    EMPTY_STUDY,
-    isStudyData,
-  );
-  const [finance, , financeLoaded] = useLocalStorage(
-    FINANCE_STORAGE_KEY,
-    EMPTY_FINANCE,
-    isFinanceData,
-  );
-  const [places, , placesLoaded] = useLocalStorage(
-    LIFESTYLE_PLACES_KEY,
-    EMPTY_PLACES,
-    isPlaceList,
-  );
-  const [savedIds, , savedLoaded] = useLocalStorage(
-    LIFESTYLE_SAVED_KEY,
-    EMPTY_SAVED,
-    isSavedList,
-  );
-  const [plans, , plansLoaded] = useLocalStorage(
-    LIFESTYLE_PLANS_KEY,
-    EMPTY_PLANS,
-    isOutingPlanList,
-  );
-  const [prefs, , prefsLoaded] = useLocalStorage(
-    LIFESTYLE_PREFS_KEY,
-    DEFAULT_PREFERENCES,
-    isLifestylePreferences,
-  );
-  const [memory, , memoryLoaded] = useLocalStorage<MemoryEntry[]>(
-    MEMORY_STORAGE_KEY,
-    [],
-    isMemoryEntryList,
-  );
+  const studyStore = useStudy(EMPTY_STUDY);
+  const study = studyStore.data;
+  const studyLoaded = !studyStore.loading;
+  const financeStore = useFinance();
+  const finance = financeStore.data;
+  const financeLoaded = !financeStore.loading;
+  const placesStore = usePlaces();
+  const places = placesStore.items;
+  const placesLoaded = !placesStore.loading;
+  const savedStore = useSavedIds();
+  const savedIds = savedStore.ids;
+  const savedLoaded = !savedStore.loading;
+  const plansStore = usePlans();
+  const plans = plansStore.items;
+  const plansLoaded = !plansStore.loading;
+  const prefsStore = usePrefs();
+  const prefs = prefsStore.data;
+  const prefsLoaded = !prefsStore.loading;
+  const memoryStore = useMemory();
+  const memory = memoryStore.items;
+  const memoryLoaded = !memoryStore.loading;
 
   const context = useMemo(() => {
     if (today === null) return null;
@@ -261,18 +219,20 @@ const [newTaskPriority, setNewTaskPriority] =
     setCommand("");
   }
 
-  function addTask() {
+  async function addTask() {
   if (!newTaskTitle.trim()) return;
 
   const newTask: Task = {
-    id: Date.now(),
+    id: createId(),
     title: newTaskTitle.trim(),
     time: newTaskTime || "Keine Frist",
     done: false,
     priority: newTaskPriority,
   };
 
-  setTasks((current) => [...current, newTask]);
+  const result = await tasksStore.create(newTask);
+
+  if (!result.ok) return;
 
   setNewTaskTitle("");
   setNewTaskTime("");
@@ -774,7 +734,7 @@ const [newTaskPriority, setNewTaskPriority] =
   <form
     onSubmit={(event) => {
       event.preventDefault();
-      addTask();
+      void addTask();
     }}
     className="mb-4 space-y-3 rounded-2xl border border-cyan-300/20 bg-cyan-300/[0.03] p-4"
   >
@@ -833,6 +793,12 @@ const [newTaskPriority, setNewTaskPriority] =
   </form>
 )}
 
+              {tasksStore.error !== null && (
+                <p role="alert" className="mt-4 text-xs text-rose-300">
+                  {tasksStore.error}
+                </p>
+              )}
+
               <div className="mt-5 space-y-2">
                 
 {tasks.map((task) => (
@@ -841,15 +807,9 @@ const [newTaskPriority, setNewTaskPriority] =
     className="flex items-center gap-3 rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4 transition hover:bg-white/[0.04]"
   >
     <button
-      onClick={() =>
-        setTasks((current) =>
-          current.map((item) =>
-            item.id === task.id
-              ? { ...item, done: !item.done }
-              : item
-          )
-        )
-      }
+      onClick={() => {
+        void tasksStore.update(task.id, { done: !task.done });
+      }}
       aria-label={
         task.done
           ? "Aufgabe als offen markieren"
@@ -897,11 +857,9 @@ const [newTaskPriority, setNewTaskPriority] =
     </div>
 
     <button
-      onClick={() =>
-        setTasks((current) =>
-          current.filter((item) => item.id !== task.id)
-        )
-      }
+      onClick={() => {
+        void tasksStore.remove(task.id);
+      }}
       aria-label={`Aufgabe löschen: ${task.title}`}
       title="Aufgabe löschen"
       className="shrink-0 rounded-lg p-2 text-slate-500 transition hover:bg-rose-400/10 hover:text-rose-300"

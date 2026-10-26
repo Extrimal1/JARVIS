@@ -1,5 +1,5 @@
 export type Task = {
-  id: number;
+  id: string;
   title: string;
   time: string;
   done: boolean;
@@ -14,7 +14,7 @@ export function isTask(value: unknown): value is Task {
   const item = value as Record<string, unknown>;
 
   return (
-    typeof item.id === "number" &&
+    typeof item.id === "string" &&
     typeof item.title === "string" &&
     typeof item.time === "string" &&
     typeof item.done === "boolean" &&

@@ -46,7 +46,7 @@ export function RevisionPanel({
   onReview,
 }: {
   topics: Entry[];
-  onReview: (id: number, todayISO: string) => void;
+  onReview: (id: string, todayISO: string) => void;
 }) {
   const today = useToday();
   const openTopics = topics.filter((topic) => topic.done !== true);
