@@ -1,6 +1,6 @@
 import { authed } from "@/src/lib/api/withAuth";
 import { fail, failFromUnknown, ok, readJson } from "@/src/lib/api/respond";
-import { crudHandlers } from "@/src/lib/api/crud";
+import { checkFailed, crudHandlers } from "@/src/lib/api/crud";
 import { transactionsConfig } from "@/src/lib/api/modules/finance";
 import { dbFromAuth } from "@/src/lib/supabase/db";
 import { MAX_BULK_ITEMS } from "@/src/lib/api/modules/uploads";
@@ -31,6 +31,18 @@ export const POST = authed(async (request, auth) => {
 
     if (items.length === 0 || items.length > MAX_BULK_ITEMS) {
       return fail("bad-request", "Ungültige Anfrage.", 400);
+    }
+
+    // Validate everything before writing anything: an invalid item
+    // mid-loop would otherwise leave a partial import behind (the loop
+    // below has no transaction). checkCreate is read-only (validation +
+    // ownership reads), so double-checking is safe.
+    for (const item of items) {
+      const checked = await transactionsConfig.checkCreate(db, item);
+
+      if (checkFailed(checked)) {
+        return fail("bad-request", checked.message, 400);
+      }
     }
 
     let imported = 0;

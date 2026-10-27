@@ -275,7 +275,7 @@ export function GoalsPanel({
                 >
                   <div
                     style={{ width: `${percent}%` }}
-                    className={`h-full rounded-full ${reached ? "bg-emerald-400" : "bg-cyan-300"}`}
+                    className={`jarvis-progress h-full rounded-full ${reached ? "bg-emerald-400" : "bg-cyan-300"}`}
                   />
                 </div>
 

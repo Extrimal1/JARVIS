@@ -9,6 +9,9 @@ import { NextResponse, type NextRequest } from "next/server";
 
 const PUBLIC_PATHS = ["/login", "/manifest.webmanifest", "/favicon.ico"];
 
+// Public data endpoints (no login, no user data): health + weather.
+const PUBLIC_API_PREFIXES = ["/api/auth/", "/api/health", "/api/weather/"];
+
 export function proxy(request: NextRequest) {
   if (process.env.NEXT_PUBLIC_CLOUD_ENABLED !== "1") {
     return NextResponse.next();
@@ -21,8 +24,7 @@ export function proxy(request: NextRequest) {
       (publicPath) =>
         pathname === publicPath || pathname.startsWith(`${publicPath}/`),
     ) ||
-    pathname.startsWith("/api/auth/") ||
-    pathname.startsWith("/api/health")
+    PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix))
   ) {
     return NextResponse.next();
   }

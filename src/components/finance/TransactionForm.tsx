@@ -175,10 +175,10 @@ export function TransactionForm({
       <button
         aria-label="Schließen"
         onClick={onClose}
-        className="absolute inset-0 h-full w-full cursor-default bg-black/70"
+        className="jarvis-fade absolute inset-0 h-full w-full cursor-default bg-black/70"
       />
 
-      <div className="relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl border border-white/10 bg-[#0d111b] p-6">
+      <div className="jarvis-pop relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl border border-white/10 bg-[#0d111b] p-6">
         <div className="flex items-start justify-between gap-3">
           <h2 id="transaction-form-title" className="text-lg font-semibold">
             {mode === "new"
@@ -311,7 +311,7 @@ export function TransactionForm({
           <div className="flex gap-2 pt-1">
             <button
               type="submit"
-              className="flex-1 rounded-xl bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-cyan-200"
+              className="jarvis-press flex-1 rounded-xl bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-cyan-200"
             >
               {mode === "new" ? "Buchung speichern" : "Änderungen speichern"}
             </button>

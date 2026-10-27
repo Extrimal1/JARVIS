@@ -24,3 +24,181 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* ------------------------------------------------------------------ */
+/* J.A.R.V.I.S. motion system (CSS-only, reduced-motion aware).        */
+/* Entry animations are reserved for top-level dashboard blocks with    */
+/* small stagger delays; everything else stays static or hover-only.   */
+/* ------------------------------------------------------------------ */
+
+@keyframes jarvis-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.jarvis-enter {
+  animation: jarvis-enter 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: var(--enter-delay, 0ms);
+}
+
+@keyframes jarvis-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.jarvis-fade {
+  animation: jarvis-fade 0.25s ease-out both;
+}
+
+@keyframes jarvis-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.jarvis-pop {
+  animation: jarvis-pop 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Subtle hover lift for clickable cards (border glow, no scaling). */
+.jarvis-lift {
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.jarvis-lift:hover {
+  transform: translateY(-2px);
+  border-color: rgb(103 232 249 / 0.25);
+}
+
+.jarvis-lift:active {
+  transform: translateY(0);
+}
+
+/* Press feedback for primary buttons. */
+.jarvis-press {
+  transition:
+    transform 0.12s ease,
+    background-color 0.15s ease;
+}
+
+.jarvis-press:active {
+  transform: scale(0.97);
+}
+
+@keyframes jarvis-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.jarvis-skeleton {
+  background: linear-gradient(
+    100deg,
+    rgb(255 255 255 / 0.04) 40%,
+    rgb(255 255 255 / 0.09) 50%,
+    rgb(255 255 255 / 0.04) 60%
+  );
+  background-size: 200% 100%;
+  animation: jarvis-shimmer 1.6s linear infinite;
+}
+
+/* Smooth value changes for progress indicators. */
+.jarvis-progress {
+  transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Weather icon micro-motion (inner glyph only, never the tile). */
+@keyframes jarvis-spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes jarvis-drift {
+  0%,
+  100% {
+    transform: translateX(-2px);
+  }
+  50% {
+    transform: translateX(2px);
+  }
+}
+
+@keyframes jarvis-bob {
+  0%,
+  100% {
+    transform: translateY(-1.5px);
+  }
+  50% {
+    transform: translateY(1.5px);
+  }
+}
+
+.wx-anim-clear > svg {
+  animation: jarvis-spin-slow 28s linear infinite;
+}
+
+.wx-anim-partly > svg,
+.wx-anim-overcast > svg,
+.wx-anim-fog > svg {
+  animation: jarvis-drift 7s ease-in-out infinite;
+}
+
+.wx-anim-drizzle > svg,
+.wx-anim-rain > svg,
+.wx-anim-storm > svg,
+.wx-anim-snow > svg {
+  animation: jarvis-bob 4.5s ease-in-out infinite;
+}
+
+/* Slow ambient pulse for the small hero orb only. */
+@keyframes jarvis-orb {
+  0%,
+  100% {
+    box-shadow: 0 0 50px rgb(34 211 238 / 0.12);
+  }
+  50% {
+    box-shadow: 0 0 70px rgb(34 211 238 / 0.22);
+  }
+}
+
+.jarvis-orb {
+  animation: jarvis-orb 6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .jarvis-skeleton {
+    animation: none;
+    background: rgb(255 255 255 / 0.05);
+  }
+}

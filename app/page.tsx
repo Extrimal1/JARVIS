@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import Sidebar from "@/src/components/Sidebar";
+import { WeatherCard } from "@/src/components/weather/WeatherCard";
 import { useToday } from "@/src/hooks/useToday";
 import { EVENT_TYPE_STYLES } from "@/src/lib/calendar";
 import {
@@ -268,7 +269,7 @@ const [newTaskPriority, setNewTaskPriority] =
           </header>
 
           <div className="mt-9 grid gap-5 xl:grid-cols-[1.5fr_1fr]">
-            <section className="relative overflow-hidden rounded-3xl border border-cyan-300/15 bg-gradient-to-br from-[#102333] via-[#101827] to-[#111321] p-6 sm:p-9">
+            <section className="jarvis-enter relative overflow-hidden rounded-3xl border border-cyan-300/15 bg-gradient-to-br from-[#102333] via-[#101827] to-[#111321] p-6 sm:p-9">
               <div className="pointer-events-none absolute -right-16 -top-20 h-64 w-64 rounded-full bg-cyan-400/[0.09] blur-3xl" />
 
               <div className="relative">
@@ -308,7 +309,7 @@ const [newTaskPriority, setNewTaskPriority] =
                   <button
                     onClick={submitCommand}
                     aria-label="Anfrage senden"
-                    className="rounded-xl bg-cyan-300 p-3 text-slate-950 transition hover:bg-cyan-200"
+                    className="jarvis-press rounded-xl bg-cyan-300 p-3 text-slate-950 transition hover:bg-cyan-200"
                   >
                     <ArrowUpRight size={19} />
                   </button>
@@ -341,14 +342,17 @@ const [newTaskPriority, setNewTaskPriority] =
               </div>
             </section>
 
-            <section className="flex flex-col items-center justify-center rounded-3xl border border-white/[0.08] bg-[#0d111b] p-7">
+            <section
+              className="jarvis-enter flex flex-col items-center justify-center rounded-3xl border border-white/[0.08] bg-[#0d111b] p-7"
+              style={{ "--enter-delay": "60ms" } as React.CSSProperties}
+            >
               <div className="relative flex h-48 w-48 items-center justify-center">
                 <div className="absolute inset-0 rounded-full border border-cyan-300/10" />
                 <div className="absolute inset-4 rounded-full border border-cyan-300/20" />
                 <div className="absolute inset-8 rounded-full border border-cyan-300/25" />
                 <div className="absolute inset-12 rounded-full border border-cyan-300/30" />
 
-                <div className="flex h-20 w-20 items-center justify-center rounded-full border border-cyan-200/40 bg-cyan-300/10 text-cyan-200 shadow-[0_0_50px_rgba(34,211,238,0.12)]">
+                <div className="jarvis-orb flex h-20 w-20 items-center justify-center rounded-full border border-cyan-200/40 bg-cyan-300/10 text-cyan-200">
                   <Activity size={34} />
                 </div>
               </div>
@@ -375,9 +379,14 @@ const [newTaskPriority, setNewTaskPriority] =
             </section>
           </div>
 
+          <div className="mt-7">
+            <WeatherCard />
+          </div>
+
           <section
             aria-label="Tagesbriefing"
-            className="mt-7 rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6"
+            className="jarvis-enter mt-7 rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6"
+            style={{ "--enter-delay": "180ms" } as React.CSSProperties}
           >
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-cyan-300/[0.08] text-cyan-300">
@@ -707,7 +716,10 @@ const [newTaskPriority, setNewTaskPriority] =
               )}
           </section>
 
-          <div className="mt-7 grid gap-5 lg:grid-cols-[1.3fr_1fr]">
+          <div
+            className="jarvis-enter mt-7 grid gap-5 lg:grid-cols-[1.3fr_1fr]"
+            style={{ "--enter-delay": "240ms" } as React.CSSProperties}
+          >
             <section
               id="aufgaben"
               className="scroll-mt-4 rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6"
@@ -804,7 +816,7 @@ const [newTaskPriority, setNewTaskPriority] =
 {tasks.map((task) => (
   <div
     key={task.id}
-    className="flex items-center gap-3 rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4 transition hover:bg-white/[0.04]"
+    className="jarvis-lift flex items-center gap-3 rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4 hover:bg-white/[0.04]"
   >
     <button
       onClick={() => {
