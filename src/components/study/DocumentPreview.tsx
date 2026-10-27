@@ -123,10 +123,10 @@ export function DocumentPreview({
       <button
         aria-label="Schließen"
         onClick={onClose}
-        className="absolute inset-0 h-full w-full cursor-default bg-black/70"
+        className="jarvis-fade absolute inset-0 h-full w-full cursor-default bg-black/70"
       />
 
-      <div className="relative flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-white/10 bg-[#0d111b] p-6">
+      <div className="jarvis-pop relative flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-white/10 bg-[#0d111b] p-6">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2

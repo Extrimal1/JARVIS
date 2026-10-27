@@ -100,7 +100,7 @@ function LoginForm() {
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-[#080b12] px-5 text-slate-100">
-      <div className="w-full max-w-sm rounded-3xl border border-white/[0.08] bg-[#0d111b] p-8">
+      <div className="jarvis-pop w-full max-w-sm rounded-3xl border border-white/[0.08] bg-[#0d111b] p-8">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-cyan-400/30 bg-cyan-400/10 text-cyan-300">
             <Command size={22} />

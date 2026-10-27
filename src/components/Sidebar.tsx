@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { CLOUD_ENABLED } from "@/src/lib/db/mode";
 import {
   Activity,
   BookOpen,
@@ -10,6 +11,7 @@ import {
   CalendarDays,
   Command,
   Compass,
+  LogOut,
   Menu,
   Mic,
   Wallet,
@@ -62,9 +64,9 @@ function NavLinks({
             href={href}
             onClick={onNavigate}
             aria-current={active ? "page" : undefined}
-            className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm transition ${
+            className={`relative flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm transition ${
               active
-                ? "border border-cyan-300/10 bg-cyan-300/10 text-cyan-200"
+                ? "jarvis-nav-active border border-cyan-300/10 bg-cyan-300/10 text-cyan-200"
                 : "text-slate-400 hover:bg-white/[0.04] hover:text-white"
             }`}
           >
@@ -77,11 +79,60 @@ function NavLinks({
   );
 }
 
+function SignOutButton() {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  if (!CLOUD_ENABLED) return null;
+
+  async function signOut() {
+    if (busy) return;
+
+    setBusy(true);
+    setFailed(false);
+
+    try {
+      const res = await fetch("/api/auth/logout", { method: "POST" });
+
+      if (!res.ok) {
+        setFailed(true);
+        return;
+      }
+
+      router.replace("/login");
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-3">
+      <button
+        onClick={() => void signOut()}
+        disabled={busy}
+        className="jarvis-press flex w-full items-center gap-3 rounded-xl border border-white/10 px-3 py-3 text-sm text-slate-400 transition hover:border-white/25 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <LogOut size={18} />
+        {busy ? "Wird abgemeldet …" : "Abmelden"}
+      </button>
+
+      {failed && (
+        <p role="alert" className="mt-2 text-xs text-rose-300">
+          Abmelden fehlgeschlagen. Bitte versuche es erneut.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function StatusCard() {
   return (
     <div className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-4">
       <div className="flex items-center gap-2 text-sm">
-        <span className="h-2 w-2 rounded-full bg-emerald-400" />
+        <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
         System aktiv
       </div>
 
@@ -146,10 +197,10 @@ export default function Sidebar() {
           <button
             aria-label="Menü schließen"
             onClick={() => setOpen(false)}
-            className="absolute inset-0 h-full w-full cursor-default bg-black/70"
+            className="jarvis-fade absolute inset-0 h-full w-full cursor-default bg-black/70"
           />
 
-          <div className="absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col border-r border-white/10 bg-[#0d111b] p-6">
+          <div className="jarvis-drawer absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col border-r border-white/10 bg-[#0d111b] p-6">
             <div className="flex items-center justify-between gap-3">
               <Brand onNavigate={() => setOpen(false)} />
 
@@ -172,6 +223,7 @@ export default function Sidebar() {
 
             <div className="mt-auto">
               <StatusCard />
+              <SignOutButton />
             </div>
           </div>
         </div>
@@ -191,6 +243,7 @@ export default function Sidebar() {
         <div className="mt-auto">
           <StatusCard />
         </div>
+        <SignOutButton />
       </aside>
     </>
   );

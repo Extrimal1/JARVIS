@@ -662,7 +662,7 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
                 {visibleDocs.map((doc) => (
                   <li
                     key={doc.id}
-                    className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4"
+                    className="jarvis-lift rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4"
                   >
                     <div className="flex items-start gap-3">
                       <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-cyan-300/[0.08] text-cyan-300">
@@ -735,7 +735,7 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
                     </div>
 
                     {editingId === doc.id && (
-                      <div className="mt-3 space-y-3 rounded-2xl border border-cyan-300/15 bg-cyan-300/[0.03] p-4">
+                      <div className="jarvis-fade mt-3 space-y-3 rounded-2xl border border-cyan-300/15 bg-cyan-300/[0.03] p-4">
                         <label className="block text-xs text-slate-400">
                           Fach
                           <select
