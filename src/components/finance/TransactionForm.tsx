@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Trash2, X } from "lucide-react";
 import { useLockBodyScroll } from "@/src/hooks/useLockBodyScroll";
 import { parseISODateLocal } from "@/src/lib/calendar";
+import { createId } from "@/src/lib/ids";
 import {
   EXPENSE_CATEGORIES,
   INCOME_CATEGORIES,
@@ -134,7 +135,7 @@ export function TransactionForm({
     if (Object.keys(nextErrors).length > 0 || cents === null) return;
 
     onSave({
-      id: initial?.id ?? Date.now().toString(),
+      id: initial?.id ?? createId(),
       title: fields.title.trim(),
       amount: cents,
       type: fields.type,

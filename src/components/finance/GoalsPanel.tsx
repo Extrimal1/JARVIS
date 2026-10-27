@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Pencil, Plus, Trash2 } from "lucide-react";
+import { createId } from "@/src/lib/ids";
 import {
   centsToEuroInput,
   formatCents,
@@ -86,7 +87,7 @@ export function GoalsPanel({
 
     if (editingId === "new") {
       onAdd({
-        id: Date.now().toString(),
+        id: createId(),
         title: title.trim(),
         targetCents,
         savedCents,

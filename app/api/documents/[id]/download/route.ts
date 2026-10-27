@@ -20,13 +20,25 @@ export const GET = authed(async (_request, auth, route) => {
       return fail("bad-request", "Ungültige Anfrage.", 400);
     }
 
-    const urls = await downloadStudyDoc(db, id);
+    try {
+      const urls = await downloadStudyDoc(db, id);
 
-    if (urls === null) {
-      return fail("not-found", "Dokument nicht gefunden.", 404);
+      if (urls === null) {
+        return fail("not-found", "Dokument nicht gefunden.", 404);
+      }
+
+      return ok(urls);
+    } catch (error) {
+      if (error instanceof Error && error.message === "OBJECT_NOT_FOUND") {
+        return fail(
+          "not-found",
+          "Die Datei fehlt im Speicher. Bitte lade das Dokument erneut hoch.",
+          404,
+        );
+      }
+
+      throw error;
     }
-
-    return ok(urls);
   } catch (error) {
     return failFromUnknown("documents/download", error);
   }

@@ -95,6 +95,7 @@ import {
   isUserSettings,
   type UserSettings,
 } from "@/src/lib/settings";
+import { ensureUuid } from "@/src/lib/ids";
 
 /** Per-module hooks over useListResource / useSingletonResource. */
 
@@ -465,6 +466,8 @@ export function useStudy(initial: StudyData): StudyResource {
           return result;
         }
 
+        // Release first: refresh() is a no-op while the guard is held.
+        inflight.current = false;
         await refresh();
 
         return { ok: true, data: entry };
@@ -535,6 +538,8 @@ export function useStudy(initial: StudyData): StudyResource {
           return result;
         }
 
+        // Release first: refresh() is a no-op while the guard is held.
+        inflight.current = false;
         await refresh();
 
         return { ok: true, data: merged };
@@ -578,6 +583,8 @@ export function useStudy(initial: StudyData): StudyResource {
           return result;
         }
 
+        // Release first: refresh() is a no-op while the guard is held.
+        inflight.current = false;
         await refresh();
 
         return { ok: true, data: null };
@@ -759,17 +766,23 @@ export function useFinance(): FinanceResource {
 
       if (!(await guard())) return busy() as RemoteResult<Transaction>;
 
+      // Legacy timestamp ids (pre-UUID app versions) are minted fresh here
+      // so re-submitted records succeed; valid UUIDs pass through untouched
+      // and edits keep their id (which always exists remotely).
+      const id = ensureUuid(tx.id);
+      const outgoing = id === tx.id ? tx : { ...tx, id };
+
       try {
         const exists = (remote?.transactions ?? []).some(
-          (item) => item.id === tx.id,
+          (item) => item.id === outgoing.id,
         );
         const result = exists
           ? await apiUnknown(
-              `/api/finance/transactions/${encodeURIComponent(tx.id)}`,
+              `/api/finance/transactions/${encodeURIComponent(outgoing.id)}`,
               "PATCH",
-              tx,
+              outgoing,
             )
-          : await apiUnknown("/api/finance/transactions", "POST", tx);
+          : await apiUnknown("/api/finance/transactions", "POST", outgoing);
 
         if (!result.ok) {
           setError(result.error);
@@ -777,9 +790,11 @@ export function useFinance(): FinanceResource {
           return result;
         }
 
+        // Release first: refresh() is a no-op while the guard is held.
+        release();
         await refresh();
 
-        return { ok: true, data: tx };
+        return { ok: true, data: outgoing };
       } finally {
         release();
       }
@@ -814,6 +829,8 @@ export function useFinance(): FinanceResource {
           return result;
         }
 
+        // Release first: refresh() is a no-op while the guard is held.
+        release();
         await refresh();
 
         return { ok: true, data: null };
@@ -845,6 +862,8 @@ export function useFinance(): FinanceResource {
           return result;
         }
 
+        // Release first: refresh() is a no-op while the guard is held.
+        release();
         await refresh();
 
         return { ok: true, data: null };
@@ -881,6 +900,8 @@ export function useFinance(): FinanceResource {
           return result;
         }
 
+        // Release first: refresh() is a no-op while the guard is held.
+        release();
         await refresh();
 
         return { ok: true, data: null };
@@ -918,6 +939,8 @@ export function useFinance(): FinanceResource {
           return result;
         }
 
+        // Release first: refresh() is a no-op while the guard is held.
+        release();
         await refresh();
 
         return { ok: true, data: null };
@@ -942,8 +965,13 @@ export function useFinance(): FinanceResource {
       if (!(await guard()))
         return busy() as RemoteResult<SavingsGoal>;
 
+      // Same legacy-id normalization as transactions (goals shared the
+      // old `Date.now()` id pattern).
+      const id = ensureUuid(goal.id);
+      const outgoing = id === goal.id ? goal : { ...goal, id };
+
       try {
-        const result = await apiUnknown("/api/finance/goals", "POST", goal);
+        const result = await apiUnknown("/api/finance/goals", "POST", outgoing);
 
         if (!result.ok) {
           setError(result.error);
@@ -951,9 +979,11 @@ export function useFinance(): FinanceResource {
           return result;
         }
 
+        // Release first: refresh() is a no-op while the guard is held.
+        release();
         await refresh();
 
-        return { ok: true, data: goal };
+        return { ok: true, data: outgoing };
       } finally {
         release();
       }
@@ -990,6 +1020,8 @@ export function useFinance(): FinanceResource {
           return result;
         }
 
+        // Release first: refresh() is a no-op while the guard is held.
+        release();
         await refresh();
 
         return { ok: true, data: goal };
@@ -1025,6 +1057,8 @@ export function useFinance(): FinanceResource {
           return result;
         }
 
+        // Release first: refresh() is a no-op while the guard is held.
+        release();
         await refresh();
 
         return { ok: true, data: null };
@@ -1072,11 +1106,15 @@ export function useFinance(): FinanceResource {
         }>;
       }
 
+      // Normalized once: the batch id links rows via `sourceDocumentId`,
+      // so every use below must share this exact value.
+      const batchId = ensureUuid(meta.id);
+
       try {
         const created = await apiUnknown(
           "/api/finance/statement-upload",
           "POST",
-          { ...meta, count: rows.length },
+          { ...meta, id: batchId, count: rows.length },
         );
 
         if (!created.ok) {
@@ -1111,7 +1149,7 @@ export function useFinance(): FinanceResource {
           }
         } catch {
           await apiUnknown(
-            `/api/finance/batches/${encodeURIComponent(meta.id)}`,
+            `/api/finance/batches/${encodeURIComponent(batchId)}`,
             "DELETE",
           );
           setError("PDF-Upload fehlgeschlagen. Import abgebrochen.");
@@ -1123,11 +1161,16 @@ export function useFinance(): FinanceResource {
           "/api/finance/transactions/bulk",
           "POST",
           {
-            items: rows.map((row) => ({
-              ...row,
-              sourceDocumentId: meta.id,
-              importStatus: "imported",
-            })),
+            items: rows.map((row) => {
+              const id = ensureUuid(row.id);
+
+              return {
+                ...row,
+                id,
+                sourceDocumentId: batchId,
+                importStatus: "imported",
+              };
+            }),
           },
         );
 
@@ -1142,6 +1185,8 @@ export function useFinance(): FinanceResource {
             ? (bulk.data as { imported: number }).imported
             : rows.length;
 
+        // Release first: refresh() is a no-op while the guard is held.
+        release();
         await refresh();
 
         return {
@@ -1206,6 +1251,8 @@ export function useFinance(): FinanceResource {
                 .deletedTransactions
             : 0;
 
+        // Release first: refresh() is a no-op while the guard is held.
+        release();
         await refresh();
 
         return { ok: true, data: count };
@@ -1288,6 +1335,8 @@ export function useFinance(): FinanceResource {
           return result;
         }
 
+        // Release first: refresh() is a no-op while the guard is held.
+        release();
         await refresh();
 
         return { ok: true, data: null };

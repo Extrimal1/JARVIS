@@ -1,5 +1,6 @@
 import { MAX_PDF_SIZE_BYTES } from "@/src/lib/finance/pdf";
 import type { ImportBatchMeta } from "@/src/lib/finance/importStore";
+import { isUuid } from "@/src/lib/ids";
 import {
   dbGetOne,
   dbInsert,
@@ -37,8 +38,9 @@ export function validStatementUpload(body: unknown): StatementUploadInput | null
   const record = body as Record<string, unknown>;
 
   if (
-    typeof record.id !== "string" ||
-    record.id.trim() === "" ||
+    // `finance_import_batches.id` is a uuid column: reject legacy
+    // timestamp ids here instead of failing inside Postgres.
+    !isUuid(record.id) ||
     typeof record.fileName !== "string" ||
     !record.fileName.toLowerCase().endsWith(".pdf") ||
     typeof record.fileSize !== "number" ||
@@ -73,6 +75,14 @@ export async function createStatementUpload(
     `${input.id}/${sanitizeFileName(input.fileName)}`,
   );
 
+  // Mint first: URL issuance is stateless, so a mint failure leaves no
+  // orphan batch behind (the client cannot clean up after a failed POST).
+  const { signedUrl } = await createSignedUploadUrl(
+    db,
+    FINANCE_BUCKET,
+    storagePath,
+  );
+
   const rows = await dbInsert<Record<string, unknown>>(
     db,
     "finance_import_batches",
@@ -92,12 +102,6 @@ export async function createStatementUpload(
   if (first === undefined) {
     throw new Error("INSERT_EMPTY:finance_import_batches");
   }
-
-  const { signedUrl } = await createSignedUploadUrl(
-    db,
-    FINANCE_BUCKET,
-    storagePath,
-  );
 
   return {
     batch: {

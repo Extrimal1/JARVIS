@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 /** Email+password login (cloud mode only; unused in local mode). */
 
-export default function LoginPage() {
+export default function LoginPage() { 
   return (
     <Suspense
       fallback={

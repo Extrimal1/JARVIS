@@ -18,7 +18,7 @@ export type SupabaseEnv = {
 
 export function supabaseEnv(): SupabaseEnv | null {
   const url = (process.env.SUPABASE_URL ?? "").replace(/\/+$/, "");
-  const anonKey = process.env.SUPABASE_ANON_KEY ?? "";
+  const anonKey = process.env.SUPABASE_PUBLISHABLE_KEY ?? "";
 
   if (url === "" || anonKey === "") return null;
 

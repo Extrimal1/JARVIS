@@ -13,6 +13,7 @@ import {
   dbUpdate,
   type DbClient,
 } from "@/src/lib/supabase/db";
+import { SupabaseHttpError } from "@/src/lib/supabase/supabase";
 import {
   createSignedDownloadUrl,
   createSignedUploadUrl,
@@ -161,6 +162,14 @@ export async function createStudyDoc(
   const safeName = sanitizeFileName(input.name);
   const storagePath = ownerPath(userId, `${input.id}/${safeName}`);
 
+  // Mint first: URL issuance is stateless, so a mint failure leaves no
+  // orphan row behind (the client cannot clean up after a failed POST).
+  const { signedUrl } = await createSignedUploadUrl(
+    db,
+    STUDY_BUCKET,
+    storagePath,
+  );
+
   const rows = await dbInsert<Record<string, unknown>>(
     db,
     "study_documents",
@@ -185,12 +194,6 @@ export async function createStudyDoc(
     throw new Error("INSERT_EMPTY:study_documents");
   }
 
-  const { signedUrl } = await createSignedUploadUrl(
-    db,
-    STUDY_BUCKET,
-    storagePath,
-  );
-
   return { doc: rowToMeta(first) as DocumentMeta, uploadUrl: signedUrl };
 }
 
@@ -210,13 +213,14 @@ export async function completeStudyDocText(
 
   const textPath = ownerPath(userId, `${id}.txt`);
 
-  await dbUpdate(db, "study_documents", id, { text_path: textPath });
-
+  // Mint before writing, so a mint failure leaves the row untouched.
   const { signedUrl } = await createSignedUploadUrl(
     db,
     STUDY_BUCKET,
     textPath,
   );
+
+  await dbUpdate(db, "study_documents", id, { text_path: textPath });
 
   return { textUploadUrl: signedUrl };
 }
@@ -303,17 +307,30 @@ export async function downloadStudyDoc(
     return null;
   }
 
-  const url = await createSignedDownloadUrl(db, STUDY_BUCKET, row.storage_path, 600);
-  const textPath =
-    typeof row.text_path === "string" && row.text_path !== ""
-      ? row.text_path
-      : null;
-  const textUrl =
-    textPath === null
-      ? null
-      : await createSignedDownloadUrl(db, STUDY_BUCKET, textPath, 600);
+  try {
+    const url = await createSignedDownloadUrl(db, STUDY_BUCKET, row.storage_path, 600);
+    const textPath =
+      typeof row.text_path === "string" && row.text_path !== ""
+        ? row.text_path
+        : null;
+    const textUrl =
+      textPath === null
+        ? null
+        : await createSignedDownloadUrl(db, STUDY_BUCKET, textPath, 600);
 
-  return { url, textUrl };
+    return { url, textUrl };
+  } catch (error) {
+    // Record exists but bytes were never uploaded (e.g. interrupted
+    // upload): surface 404, not a generic 400, so the UI can say so.
+    if (
+      error instanceof SupabaseHttpError &&
+      error.message === "Object not found"
+    ) {
+      throw new Error("OBJECT_NOT_FOUND");
+    }
+
+    throw error;
+  }
 }
 
 export async function deleteStudyDoc(

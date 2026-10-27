@@ -31,13 +31,18 @@ export async function createSignedDownloadUrl(
     throw new Error("Storage: no signed URL returned.");
   }
 
-  return url.startsWith("http") ? url : `${db.env.url}${url}`;
+  // Sign responses are storage-root-relative (`/object/...`); the project
+  // root alone is missing the `/storage/v1` segment and 404s in browsers.
+  return url.startsWith("http") ? url : `${db.env.url}/storage/v1${url}`;
 }
 
 /**
  * Signed upload URL for direct browser PUT (large files bypass the API
- * route body). Returns the URL plus an optional token the browser must
- * send back; verify the exact shape against a live project (SETUP.md).
+ * route body). The upload-sign endpoint answers `{ "url": "...?token=…" }`
+ * (unlike the download-sign endpoint, which answers `signedURL`); the
+ * token travels embedded in the URL, so the browser PUT needs no extra
+ * auth header. Minting issues a stateless token — call this BEFORE any
+ * database write so a mint failure leaves no orphan row behind.
  */
 export async function createSignedUploadUrl(
   db: DbClient,
@@ -47,21 +52,28 @@ export async function createSignedUploadUrl(
   const body = await supaFetch<{
     signedUrl?: string;
     signedURL?: string;
-    token?: string;
+    url?: string;
   }>(db.env, `/storage/v1/object/upload/sign/${bucket}/${path}`, {
     method: "POST",
     token: db.token,
   });
-  const url = body.signedUrl ?? body.signedURL ?? "";
+  const raw = body.signedUrl ?? body.signedURL ?? body.url ?? "";
 
-  if (url === "") {
+  if (raw === "") {
     throw new Error("Storage: no signed upload URL returned.");
   }
 
-  return {
-    signedUrl: url.startsWith("http") ? url : `${db.env.url}${url}`,
-    token: body.token ?? "",
-  };
+  // See createSignedDownloadUrl: storage-root-relative needs /storage/v1.
+  const signedUrl = raw.startsWith("http")
+    ? raw
+    : `${db.env.url}/storage/v1${raw}`;
+  const token = new URL(signedUrl).searchParams.get("token") ?? "";
+
+  if (token === "") {
+    throw new Error("Storage: signed upload URL has no token.");
+  }
+
+  return { signedUrl, token };
 }
 
 /** Small-file fallback: proxy bytes through the API route. */

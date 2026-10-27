@@ -1,3 +1,4 @@
+import { isUuid } from "@/src/lib/ids";
 import {
   dbDelete,
   dbGetOne,
@@ -50,6 +51,18 @@ export function requireId(body: unknown): string | null {
   const id = (body as Record<string, unknown>).id;
 
   return typeof id === "string" && id.trim() !== "" ? id : null;
+}
+
+/**
+ * Require a DB-compatible UUID id. All tables use `uuid` primary keys,
+ * so client-generated ids (legacy timestamp ids, stale bundles) must be
+ * rejected here with a clear message — never forwarded to Postgres,
+ * where they fail with "invalid input syntax for type uuid".
+ */
+export function requireUuidId(body: unknown): string | null {
+  const id = requireId(body);
+
+  return id !== null && isUuid(id) ? id : null;
 }
 
 export type CrudConfig = {

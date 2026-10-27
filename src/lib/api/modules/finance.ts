@@ -17,9 +17,10 @@ import {
   type DbClient,
 } from "@/src/lib/supabase/db";
 import { deleteObject } from "@/src/lib/supabase/storage";
+import { isUuid } from "@/src/lib/ids";
 import {
   pickPatch,
-  requireId,
+  requireUuidId,
   type CheckResult,
   type CrudConfig,
 } from "../crud";
@@ -86,12 +87,28 @@ export const transactionsConfig: CrudConfig = {
   isList: (value: unknown): value is unknown[] =>
     Array.isArray(value) && value.every(isTransaction),
   checkCreate: async (db, body) => {
-    if (!isTransaction(body) || requireId(body) === null) {
+    if (!isTransaction(body)) {
       return { message: "Ungültige Buchung." };
+    }
+
+    if (requireUuidId(body) === null) {
+      return {
+        message:
+          "Ungültige Buchungs-ID. Bitte lade die Seite neu und versuche es erneut.",
+      };
     }
 
     if (body.currency !== undefined && !validCurrency(body.currency)) {
       return { message: "Ungültige Währung." };
+    }
+
+    // A malformed batch id would fail the uuid lookup below with a
+    // Postgres syntax error instead of the intended ownership message.
+    if (
+      body.sourceDocumentId !== undefined &&
+      !isUuid(body.sourceDocumentId)
+    ) {
+      return { message: "Unbekannter Importstapel." };
     }
 
     if (!(await batchOwned(db, body.sourceDocumentId))) {
@@ -407,8 +424,15 @@ export const goalsConfig: CrudConfig = {
   isList: (value: unknown): value is unknown[] =>
     Array.isArray(value) && value.every(isSavingsGoal),
   checkCreate: (_db, body) => {
-    if (!isSavingsGoal(body) || requireId(body) === null) {
+    if (!isSavingsGoal(body)) {
       return { message: "Ungültiges Sparziel." };
+    }
+
+    if (requireUuidId(body) === null) {
+      return {
+        message:
+          "Ungültige Sparziel-ID. Bitte lade die Seite neu und versuche es erneut.",
+      };
     }
 
     return { row: goalToRow(body) };
@@ -463,7 +487,7 @@ export const batchesConfig: CrudConfig = {
     const record = body as Record<string, unknown>;
 
     if (
-      requireId(body) === null ||
+      requireUuidId(body) === null ||
       typeof record.fileName !== "string" ||
       record.fileName === "" ||
       typeof record.fileSize !== "number" ||
