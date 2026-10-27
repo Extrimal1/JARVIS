@@ -587,10 +587,10 @@ export function QuizPanel({
           <button
             aria-label="Quiz beenden"
             onClick={() => setRun(null)}
-            className="absolute inset-0 h-full w-full cursor-default bg-black/70"
+            className="jarvis-fade absolute inset-0 h-full w-full cursor-default bg-black/70"
           />
 
-          <div className="relative max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-3xl border border-white/10 bg-[#0d111b] p-6">
+          <div className="jarvis-pop relative max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-3xl border border-white/10 bg-[#0d111b] p-6">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h2 id="quiz-run-title" className="text-lg font-semibold">
@@ -610,7 +610,7 @@ export function QuizPanel({
             </div>
 
             {finished || current === null ? (
-              <div className="mt-6 text-center">
+              <div className="jarvis-fade mt-6 text-center">
                 <p className="text-4xl font-semibold tabular-nums text-cyan-200">
                   {run.score} / {run.queue.length}
                 </p>
@@ -640,7 +640,7 @@ export function QuizPanel({
                 </div>
               </div>
             ) : (
-              <div className="mt-5">
+              <div key={run.index} className="jarvis-fade mt-5">
                 <p className="text-sm font-medium leading-6 text-slate-100">
                   {current.question}
                 </p>

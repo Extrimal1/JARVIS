@@ -424,7 +424,7 @@ export default function FinancePage() {
           </div>
 
           {month === null ? (
-            <div className="mt-6 rounded-3xl border border-white/[0.08] bg-[#0d111b] p-10 text-center text-sm text-slate-500">
+            <div className="jarvis-fade mt-6 rounded-3xl border border-white/[0.08] bg-[#0d111b] p-10 text-center text-sm text-slate-500">
               Finanzen werden geladen …
             </div>
           ) : (
@@ -437,7 +437,10 @@ export default function FinancePage() {
                 </p>
               )}
 
-              <div className="mt-6 grid gap-4 sm:grid-cols-3">
+              <div
+                className="jarvis-enter mt-6 grid gap-4 sm:grid-cols-3"
+                style={{ "--enter-delay": "60ms" } as React.CSSProperties}
+              >
                 <div className="rounded-2xl border border-white/[0.08] bg-[#0d111b] p-5">
                   <TrendingUp className="text-emerald-300" size={22} />
                   <p className="mt-4 text-2xl font-semibold tabular-nums text-emerald-200">
@@ -474,7 +477,10 @@ export default function FinancePage() {
               </div>
 
               <div className="mt-6 grid gap-5 xl:grid-cols-2">
-                <section className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6">
+                <section
+                  className="jarvis-enter rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6"
+                  style={{ "--enter-delay": "120ms" } as React.CSSProperties}
+                >
                   <h2 className="font-semibold">Übersicht</h2>
                   <p className="mt-1 text-xs text-slate-500">
                     Einnahmen und Ausgaben der letzten sechs Monate
@@ -519,7 +525,10 @@ export default function FinancePage() {
                   </div>
                 </section>
 
-                <section className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6">
+                <section
+                  className="jarvis-enter rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6"
+                  style={{ "--enter-delay": "180ms" } as React.CSSProperties}
+                >
                   <div className="flex items-baseline justify-between gap-2">
                     <h2 className="font-semibold">Buchungen</h2>
                     <p className="text-xs text-slate-500">
@@ -543,7 +552,7 @@ export default function FinancePage() {
                           onClick={() =>
                             setDraft({ mode: "edit", transaction })
                           }
-                          className="flex w-full items-center gap-3 rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4 text-left transition hover:bg-white/[0.04]"
+                          className="jarvis-lift flex w-full items-center gap-3 rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4 text-left hover:bg-white/[0.04]"
                         >
                           <span
                             aria-hidden="true"

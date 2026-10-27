@@ -630,7 +630,7 @@ export function PlacesPanel({
                   return (
                     <li
                       key={place.id}
-                      className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4"
+                      className="jarvis-lift rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4"
                     >
                       <div className="flex items-start gap-3">
                         <div className="min-w-0 flex-1">

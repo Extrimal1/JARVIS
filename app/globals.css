@@ -43,7 +43,7 @@ body {
 }
 
 .jarvis-enter {
-  animation: jarvis-enter 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: jarvis-enter var(--jarvis-duration-enter) var(--jarvis-ease-out) both;
   animation-delay: var(--enter-delay, 0ms);
 }
 
@@ -72,15 +72,15 @@ body {
 }
 
 .jarvis-pop {
-  animation: jarvis-pop 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: jarvis-pop var(--jarvis-duration-modal) var(--jarvis-ease-out) both;
 }
 
 /* Subtle hover lift for clickable cards (border glow, no scaling). */
 .jarvis-lift {
   transition:
-    transform 0.18s ease,
-    border-color 0.18s ease,
-    background-color 0.18s ease;
+    transform var(--jarvis-duration-standard) ease,
+    border-color var(--jarvis-duration-standard) ease,
+    background-color var(--jarvis-duration-standard) ease;
 }
 
 .jarvis-lift:hover {
@@ -95,8 +95,8 @@ body {
 /* Press feedback for primary buttons. */
 .jarvis-press {
   transition:
-    transform 0.12s ease,
-    background-color 0.15s ease;
+    transform var(--jarvis-duration-micro) ease,
+    background-color var(--jarvis-duration-micro) ease;
 }
 
 .jarvis-press:active {
@@ -125,7 +125,7 @@ body {
 
 /* Smooth value changes for progress indicators. */
 .jarvis-progress {
-  transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: width var(--jarvis-duration-viz) var(--jarvis-ease-out);
 }
 
 /* Weather icon micro-motion (inner glyph only, never the tile). */
@@ -185,6 +185,123 @@ body {
 
 .jarvis-orb {
   animation: jarvis-orb 6s ease-in-out infinite;
+}
+
+/* Motion tokens: single source for durations and easing. */
+:root {
+  --jarvis-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --jarvis-duration-micro: 120ms;
+  --jarvis-duration-standard: 200ms;
+  --jarvis-duration-enter: 450ms;
+  --jarvis-duration-modal: 280ms;
+  --jarvis-duration-viz: 600ms;
+}
+
+/* Shared ambient background (see RootLayout). Fixed, click-through,
+   nearly transparent: static depth gradients plus one small drifting
+   glow blob (transform-only, cheap to composite). */
+.jarvis-ambient {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  background:
+    radial-gradient(
+      900px 500px at 85% -5%,
+      rgb(34 211 238 / 0.05),
+      transparent 60%
+    ),
+    radial-gradient(
+      700px 500px at 10% 110%,
+      rgb(59 130 246 / 0.05),
+      transparent 60%
+    );
+}
+
+.jarvis-ambient-blob {
+  position: absolute;
+  top: 12%;
+  left: 8%;
+  width: 220px;
+  height: 220px;
+  border-radius: 9999px;
+  background: radial-gradient(
+    circle,
+    rgb(34 211 238 / 0.06),
+    transparent 70%
+  );
+  animation: jarvis-ambient-drift 46s ease-in-out infinite alternate;
+}
+
+@keyframes jarvis-ambient-drift {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(60px, 30px, 0);
+  }
+}
+
+/* Active-nav indicator bar (fades in when the route renders). */
+.jarvis-nav-active::before {
+  content: "";
+  position: absolute;
+  left: 0.45rem;
+  top: 50%;
+  width: 3px;
+  height: 1.1rem;
+  transform: translateY(-50%);
+  border-radius: 9999px;
+  background: rgb(103 232 249 / 0.8);
+  animation: jarvis-fade var(--jarvis-duration-standard) ease-out both;
+}
+
+/* Mobile drawer entrance. */
+@keyframes jarvis-drawer {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.jarvis-drawer {
+  animation: jarvis-drawer var(--jarvis-duration-modal) var(--jarvis-ease-out) both;
+}
+
+/* Visible keyboard focus everywhere (pairs with existing focus styles). */
+:focus-visible {
+  outline: 2px solid rgb(103 232 249 / 0.7);
+  outline-offset: 2px;
+}
+
+/* Smooth focus transitions for form controls (no resting change). */
+input,
+select,
+textarea {
+  transition:
+    border-color var(--jarvis-duration-micro) ease,
+    box-shadow var(--jarvis-duration-micro) ease,
+    background-color var(--jarvis-duration-micro) ease;
+}
+
+/* Mount-only bar growth for pure-CSS charts (transform, ends exact). */
+@keyframes jarvis-grow {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+.jarvis-grow {
+  transform-origin: bottom;
+  animation: jarvis-grow 0.5s var(--jarvis-ease-out) both;
 }
 
 @media (prefers-reduced-motion: reduce) {

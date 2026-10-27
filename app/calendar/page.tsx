@@ -243,7 +243,7 @@ export default function CalendarPage() {
             </div>
           )}
 
-          <div className="mt-4 flex flex-wrap items-center gap-3">
+          <div className="jarvis-enter mt-4 flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-1 rounded-2xl border border-white/[0.08] bg-[#0d111b] p-1">
               <button
                 onClick={() => shiftWeek(-1)}
@@ -315,11 +315,14 @@ export default function CalendarPage() {
           </div>
 
           {weekStart === null || days.length === 0 ? (
-            <div className="mt-6 rounded-3xl border border-white/[0.08] bg-[#0d111b] p-10 text-center text-sm text-slate-500">
+            <div className="jarvis-fade mt-6 rounded-3xl border border-white/[0.08] bg-[#0d111b] p-10 text-center text-sm text-slate-500">
               Kalender wird geladen …
             </div>
           ) : (
-            <div className="mt-6 max-h-[75vh] overflow-auto rounded-3xl border border-white/[0.08] bg-[#0d111b]">
+            <div
+              className="jarvis-enter mt-6 max-h-[75vh] overflow-auto rounded-3xl border border-white/[0.08] bg-[#0d111b]"
+              style={{ "--enter-delay": "80ms" } as React.CSSProperties}
+            >
               <div className="min-w-[900px]">
                 <div className="sticky top-0 z-10 grid grid-cols-[52px_repeat(7,minmax(0,1fr))] border-b border-white/[0.08] bg-[#0d111b]">
                   <div aria-hidden="true" />
@@ -583,10 +586,10 @@ function EventForm({
       <button
         aria-label="Schließen"
         onClick={onClose}
-        className="absolute inset-0 h-full w-full cursor-default bg-black/70"
+        className="jarvis-fade absolute inset-0 h-full w-full cursor-default bg-black/70"
       />
 
-      <div className="relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl border border-white/10 bg-[#0d111b] p-6">
+      <div className="jarvis-pop relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl border border-white/10 bg-[#0d111b] p-6">
         <div className="flex items-start justify-between gap-3">
           <h2 id="event-form-title" className="text-lg font-semibold">
             {mode === "new" ? "Neuer Termin" : "Termin bearbeiten"}

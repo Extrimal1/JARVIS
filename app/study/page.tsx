@@ -156,7 +156,7 @@ function StudySection({
       {expanded && (
         <form
           onSubmit={submit}
-          className="mt-5 space-y-3 rounded-2xl border border-cyan-300/15 bg-cyan-300/[0.03] p-4"
+          className="jarvis-fade mt-5 space-y-3 rounded-2xl border border-cyan-300/15 bg-cyan-300/[0.03] p-4"
         >
           <label className="block text-xs text-slate-400">
             Name
@@ -452,7 +452,10 @@ export default function StudyPage() {
             </div>
           )}
 
-          <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div
+            className="jarvis-enter mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4"
+            style={{ "--enter-delay": "60ms" } as React.CSSProperties}
+          >
             <div className="rounded-2xl border border-white/[0.08] bg-[#0d111b] p-5">
               <GraduationCap className="text-cyan-300" size={22} />
               <p className="mt-4 text-2xl font-semibold tabular-nums">
@@ -502,14 +505,17 @@ export default function StudyPage() {
                 >
                   <div
                     style={{ width: `${progressPercent}%` }}
-                    className="h-full rounded-full bg-cyan-300"
+                    className="jarvis-progress h-full rounded-full bg-cyan-300"
                   />
                 </div>
               )}
             </div>
           </div>
 
-          <div className="mt-8 grid gap-5 xl:grid-cols-2">
+          <div
+            className="jarvis-enter mt-8 grid gap-5 xl:grid-cols-2"
+            style={{ "--enter-delay": "120ms" } as React.CSSProperties}
+          >
             {sections.map((section) => (
               <StudySection
                 key={section.key}
@@ -526,7 +532,10 @@ export default function StudyPage() {
             ))}
           </div>
 
-          <div className="mt-8 space-y-5">
+          <div
+            className="jarvis-enter mt-8 space-y-5"
+            style={{ "--enter-delay": "180ms" } as React.CSSProperties}
+          >
             <RevisionPanel topics={data.topics} onReview={reviewTopic} />
             <QuizPanel
               subjects={data.subjects}

@@ -268,7 +268,8 @@ export default function LecturePage() {
 
             <section
               aria-label="Aufnahmen"
-              className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-5 sm:p-6"
+              className="jarvis-enter rounded-3xl border border-white/[0.08] bg-[#0d111b] p-5 sm:p-6"
+              style={{ "--enter-delay": "80ms" } as React.CSSProperties}
             >
               <div className="flex items-start gap-3">
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-cyan-300/[0.08] text-cyan-300">
@@ -299,7 +300,7 @@ export default function LecturePage() {
                     {finished.map((recording) => (
                       <li
                         key={recording.id}
-                        className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4"
+                        className="jarvis-lift rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4"
                       >
                         <div className="flex items-start gap-3">
                           <div className="min-w-0 flex-1">

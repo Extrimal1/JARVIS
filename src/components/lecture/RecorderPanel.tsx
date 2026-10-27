@@ -414,7 +414,7 @@ export function RecorderPanel({
   return (
     <section
       aria-label="Aufnahme"
-      className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-5 sm:p-6"
+      className="jarvis-enter rounded-3xl border border-white/[0.08] bg-[#0d111b] p-5 sm:p-6"
     >
       <div className="flex items-start gap-3">
         <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-cyan-300/[0.08] text-cyan-300">
@@ -590,7 +590,7 @@ export function RecorderPanel({
               <button
                 onClick={() => void start()}
                 disabled={busy || !consent}
-                className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-rose-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-rose-300 disabled:cursor-not-allowed disabled:opacity-40"
+                className="jarvis-press flex flex-1 items-center justify-center gap-2 rounded-xl bg-rose-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-rose-300 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <Mic size={16} />
                 {phase === "requesting" ? "Mikrofon wird geöffnet …" : "Aufnahme starten"}
@@ -600,7 +600,7 @@ export function RecorderPanel({
                 {phase === "recording" ? (
                   <button
                     onClick={pause}
-                    className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-sm text-slate-200 transition hover:bg-white/5"
+                    className="jarvis-press flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-sm text-slate-200 transition hover:bg-white/5"
                   >
                     <Pause size={16} />
                     Pause
@@ -608,7 +608,7 @@ export function RecorderPanel({
                 ) : (
                   <button
                     onClick={resume}
-                    className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-cyan-200"
+                    className="jarvis-press flex flex-1 items-center justify-center gap-2 rounded-xl bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-cyan-200"
                   >
                     <Play size={16} />
                     Fortsetzen
@@ -616,7 +616,7 @@ export function RecorderPanel({
                 )}
                 <button
                   onClick={stop}
-                  className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-cyan-200"
+                  className="jarvis-press flex flex-1 items-center justify-center gap-2 rounded-xl bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-cyan-200"
                 >
                   <Square size={16} />
                   Beenden & Speichern

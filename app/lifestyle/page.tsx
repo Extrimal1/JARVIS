@@ -113,7 +113,10 @@ export default function LifestylePage() {
             </p>
           </header>
 
-          <div className="mt-8 space-y-5">
+          <div
+            className="jarvis-enter mt-8 space-y-5"
+            style={{ "--enter-delay": "60ms" } as React.CSSProperties}
+          >
             <PreferencesPanel
               prefs={prefs}
               onSave={(next) => void savePrefs(next)}
@@ -183,7 +186,7 @@ export default function LifestylePage() {
                       return (
                         <li
                           key={place.id}
-                          className="flex items-center gap-3 rounded-2xl border border-white/[0.05] bg-white/[0.02] px-4 py-3"
+                          className="jarvis-lift flex items-center gap-3 rounded-2xl border border-white/[0.05] bg-white/[0.02] px-4 py-3"
                         >
                           <span className="min-w-0 flex-1 truncate text-sm text-slate-200">
                             {place.name}

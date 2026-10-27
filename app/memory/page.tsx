@@ -195,7 +195,7 @@ function MemoryForm({
       <div className="mt-4 flex flex-wrap gap-2">
         <button
           type="submit"
-          className="flex items-center gap-1.5 rounded-xl bg-cyan-300 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-200"
+          className="jarvis-press flex items-center gap-1.5 rounded-xl bg-cyan-300 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-200"
         >
           <Check size={16} />
           Speichern
@@ -397,7 +397,7 @@ export default function MemoryPage() {
             )}
           </div>
 
-          <div className="mt-4 flex flex-wrap items-center gap-2">
+          <div className="jarvis-enter mt-4 flex flex-wrap items-center gap-2">
             <label className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-white/10 bg-[#111827] px-3 py-2 text-sm sm:max-w-xs">
               <Search size={16} className="shrink-0 text-slate-500" />
               <input
@@ -463,7 +463,7 @@ export default function MemoryPage() {
           </div>
 
           {draft !== null && (
-            <div className="mt-5">
+            <div className="jarvis-fade mt-5">
               <MemoryForm
                 key={draft.mode === "edit" ? draft.id : "new"}
                 initial={draft.mode === "edit" ? editing : null}
@@ -490,7 +490,10 @@ export default function MemoryPage() {
             </div>
           )}
 
-          <div className="mt-5">
+          <div
+            className="jarvis-enter mt-5"
+            style={{ "--enter-delay": "80ms" } as React.CSSProperties}
+          >
             {memoryStore.loading ? (
               <div className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-10 text-center text-sm text-slate-500">
                 Erinnerungen werden geladen …
@@ -535,7 +538,7 @@ export default function MemoryPage() {
                   return (
                     <li
                       key={entry.id}
-                      className={`rounded-3xl border bg-[#0d111b] p-5 ${
+                      className={`jarvis-lift rounded-3xl border bg-[#0d111b] p-5 ${
                         entry.pinned
                           ? "border-cyan-300/25"
                           : "border-white/[0.08]"

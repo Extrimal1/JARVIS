@@ -40,7 +40,7 @@ function ProgressBar({
       >
         <div
           style={{ width: `${percent}%` }}
-          className={`h-full rounded-full ${exceeded ? "bg-rose-400" : "bg-cyan-300"}`}
+          className={`jarvis-progress h-full rounded-full ${exceeded ? "bg-rose-400" : "bg-cyan-300"}`}
         />
       </div>
 

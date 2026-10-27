@@ -40,14 +40,14 @@ export function FinanceChart({ series }: { series: MonthPoint[] }) {
                 style={{
                   height: `${Math.max(point.income > 0 ? 3 : 0, (point.income / max) * 100)}%`,
                 }}
-                className="w-full max-w-8 rounded-t-md bg-emerald-400/70"
+                className="jarvis-grow w-full max-w-8 rounded-t-md bg-emerald-400/70"
               />
               <div
                 title={`Ausgaben im ${point.label}: ${formatCents(point.expense)}`}
                 style={{
                   height: `${Math.max(point.expense > 0 ? 3 : 0, (point.expense / max) * 100)}%`,
                 }}
-                className="w-full max-w-8 rounded-t-md bg-rose-400/70"
+                className="jarvis-grow w-full max-w-8 rounded-t-md bg-rose-400/70"
               />
             </div>
 
