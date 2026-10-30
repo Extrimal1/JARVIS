@@ -335,7 +335,12 @@ function StudySection({
 
       {sectionKey === "materials" && (
         <div className="mt-6 border-t border-white/[0.06] pt-6">
-          <DocumentLibrary subjects={subjects} />
+          <DocumentLibrary
+            subjects={subjects}
+            onSaveMaterial={async (entry) => {
+              await onAdd("materials", entry);
+            }}
+          />
         </div>
       )}
     </section>

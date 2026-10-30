@@ -90,6 +90,16 @@ import {
   type MemoryEntry,
 } from "@/src/lib/memory";
 import {
+  CONVERSATION_MESSAGES_KEY,
+  CONVERSATION_THREADS_KEY,
+  isConversationMessage,
+  isConversationMessageList,
+  isConversationThread,
+  isConversationThreadList,
+  type ConversationMessage,
+  type ConversationThread,
+} from "@/src/lib/conversation";
+import {
   DEFAULT_USER_SETTINGS,
   USER_SETTINGS_KEY,
   isUserSettings,
@@ -136,6 +146,26 @@ export function useMemory(): ListResource<MemoryEntry> {
     isMemoryEntryList,
     isMemoryEntry,
     "/api/memory",
+  );
+}
+
+export function useConversationThreads(): ListResource<ConversationThread> {
+  return useListResource<ConversationThread>(
+    CONVERSATION_THREADS_KEY,
+    [],
+    isConversationThreadList,
+    isConversationThread,
+    "/api/conversations",
+  );
+}
+
+export function useConversationMessages(): ListResource<ConversationMessage> {
+  return useListResource<ConversationMessage>(
+    CONVERSATION_MESSAGES_KEY,
+    [],
+    isConversationMessageList,
+    isConversationMessage,
+    "/api/conversation-messages",
   );
 }
 

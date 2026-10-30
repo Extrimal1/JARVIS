@@ -44,7 +44,8 @@ import {
 export type ToolErrorCode =
   | "invalid-input"
   | "missing-date"
-  | "not-loaded";
+  | "not-loaded"
+  | "unavailable";
 
 export type ToolError = {
   code: ToolErrorCode;
@@ -570,3 +571,142 @@ export function getLifestylePreferences(input: {
 
   return { ok: true, data: { preferences: prefs, configured } };
 }
+
+export type CalendarList = {
+  from: string;
+  to: string;
+  events: CalendarEvent[];
+};
+
+/** Events between two ISO days (inclusive); past ranges allowed. */
+export function getCalendarList(input: {
+  events: unknown;
+  todayISO: string | null;
+  from?: string;
+  to?: string;
+}): ToolResult<CalendarList> {
+  if (input.todayISO === null) {
+    return {
+      ok: false,
+      error: toolError("missing-date", "getCalendarList: kein Datum verfügbar."),
+    };
+  }
+
+  if (!isCalendarEventList(input.events)) {
+    return { ok: false, error: invalidInput("getCalendarList") };
+  }
+
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  const from = input.from ?? input.todayISO;
+  const to = input.to ?? input.todayISO;
+
+  if (!iso.test(from) || !iso.test(to) || from > to) {
+    return {
+      ok: false,
+      error: toolError("invalid-input", "getCalendarList: ungültiger Zeitraum."),
+    };
+  }
+
+  return {
+    ok: true,
+    data: {
+      from,
+      to,
+      events: input.events
+        .filter((event) => event.date >= from && event.date <= to)
+        .sort((a, b) =>
+          a.date === b.date
+            ? a.start.localeCompare(b.start)
+            : a.date.localeCompare(b.date),
+        ),
+    },
+  };
+}
+
+export type RecentTransaction = {
+  id: string;
+  title: string;
+  date: string;
+  amountCents: number;
+  type: "income" | "expense";
+  category: string;
+  currency: string;
+};
+
+/** Newest transactions of any currency (display only, never converted). */
+export function getFinanceList(input: {
+  finance: unknown;
+  limit?: number;
+}): ToolResult<RecentTransaction[]> {
+  if (!isFinanceData(input.finance)) {
+    return { ok: false, error: invalidInput("getFinanceList") };
+  }
+
+  const limit =
+    input.limit !== undefined &&
+    Number.isInteger(input.limit) &&
+    input.limit >= 1 &&
+    input.limit <= 50
+      ? input.limit
+      : 10;
+
+  const recent = input.finance.transactions
+    .slice()
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, limit)
+    .map((transaction) => ({
+      id: transaction.id,
+      title: transaction.title,
+      date: transaction.date,
+      amountCents: transaction.amount,
+      type: transaction.type,
+      category: transaction.category,
+      currency: transaction.currency ?? "EUR",
+    }));
+
+  return { ok: true, data: recent };
+}
+
+/** Month summary, defaulting an omitted month to the current one. */
+export function getFinanceSummary(input: {
+  finance: unknown;
+  todayISO: string | null;
+  monthKey?: string;
+}): ToolResult<FinanceMonthSummary> {
+  const monthKey = input.monthKey ?? input.todayISO?.slice(0, 7) ?? "";
+
+  return getFinanceMonthSummary({ finance: input.finance, monthKey });
+}
+
+// ------------------------------------------------------------ study intel
+// Server/IDB-backed tools: unlike the sync tools above, these run
+// through `AgentOptions.asyncReads` (the caller fetches owned data
+// from the API or IndexedDB). Only the result shapes live here so
+// the registry `output` names keep resolving to `./tools` types.
+
+export type StudyDocumentRef = {
+  id: string;
+  name: string;
+  kind: string;
+  subject: string | null;
+  extractionStatus: string;
+};
+
+export type StudyDocuments = {
+  documents: StudyDocumentRef[];
+};
+
+export type StudySource = {
+  documentId: string;
+  documentName: string;
+  refLabel: string;
+  text: string;
+  score: number;
+  matchedTerms: string[];
+};
+
+export type StudyRetrieval = {
+  sources: StudySource[];
+  totalCandidates: number;
+  terms: string[];
+};

@@ -10,7 +10,7 @@
  * availability in this phase.
  */
 
-export type DocumentKind = "pdf" | "docx" | "txt" | "md";
+export type DocumentKind = "pdf" | "docx" | "pptx" | "txt" | "md";
 
 export type ExtractionStatus =
   | "not_processed"
@@ -42,6 +42,7 @@ export const MAX_FILE_SIZE = 10 * 1024 * 1024;
 export const KIND_LABELS: Record<DocumentKind, string> = {
   pdf: "PDF",
   docx: "DOCX",
+  pptx: "PPTX",
   txt: "TXT",
   md: "MD",
 };
@@ -73,6 +74,14 @@ const ALLOWED_FILES: Record<DocumentKind, AllowedEntry> = {
     ],
     primaryMime:
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  },
+  pptx: {
+    extensions: ["pptx"],
+    mimeTypes: [
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ],
+    primaryMime:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   },
   txt: {
     extensions: ["txt"],
@@ -113,7 +122,7 @@ export function validateFile(
   if (!kind) {
     return {
       ok: false,
-      error: `„${file.name}“ wird nicht unterstützt. Erlaubt sind PDF, DOCX, TXT und MD.`,
+      error: `„${file.name}“ wird nicht unterstützt. Erlaubt sind PDF, DOCX, PPTX, TXT und MD.`,
     };
   }
 
@@ -185,7 +194,7 @@ export function createDocumentId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-const DOCUMENT_KINDS: DocumentKind[] = ["pdf", "docx", "txt", "md"];
+const DOCUMENT_KINDS: DocumentKind[] = ["pdf", "docx", "pptx", "txt", "md"];
 
 const EXTRACTION_STATUSES: ExtractionStatus[] = [
   "not_processed",
@@ -218,8 +227,8 @@ export function isDocumentMeta(value: unknown): value is DocumentMeta {
   );
 }
 
-export function initialExtractionStatus(kind: DocumentKind): ExtractionStatus {
-  return kind === "txt" || kind === "md" ? "not_processed" : "unsupported";
+export function initialExtractionStatus(): ExtractionStatus {
+  return "not_processed"; // every kind has an extractor now; "unsupported" only results from processing (e.g. scanned PDFs)
 }
 
 /**
@@ -239,11 +248,14 @@ export async function extractText(
   return await blob.text();
 }
 
+export type { SourceRef } from "@/src/lib/study/extract";
+
 const DB_NAME = "jarvis-documents";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const META_STORE = "meta";
 const BLOB_STORE = "blobs";
 const TEXT_STORE = "texts";
+export const CHUNKS_STORE = "chunks";
 
 export function isIndexedDBAvailable(): boolean {
   return typeof indexedDB !== "undefined";
@@ -259,7 +271,7 @@ function toStorageError(cause: unknown, fallback: string): Error {
   return new Error(fallback);
 }
 
-function openDatabase(): Promise<IDBDatabase> {
+export function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (!isIndexedDBAvailable()) {
       reject(new Error("IndexedDB ist in diesem Browser nicht verfügbar."));
@@ -279,6 +291,10 @@ function openDatabase(): Promise<IDBDatabase> {
         db.createObjectStore(BLOB_STORE, { keyPath: "id" });
       }
 
+      if (!db.objectStoreNames.contains(CHUNKS_STORE)) {
+        db.createObjectStore(CHUNKS_STORE, { keyPath: "id" });
+      }
+
       if (!db.objectStoreNames.contains(TEXT_STORE)) {
         db.createObjectStore(TEXT_STORE, { keyPath: "id" });
       }
@@ -295,7 +311,7 @@ function openDatabase(): Promise<IDBDatabase> {
   });
 }
 
-function requestToPromise<T>(
+export function requestToPromise<T>(
   request: IDBRequest<T>,
   fallback: string,
 ): Promise<T> {
@@ -305,7 +321,7 @@ function requestToPromise<T>(
   });
 }
 
-function transactionToPromise(
+export function transactionToPromise(
   transaction: IDBTransaction,
   fallback: string,
 ): Promise<void> {
@@ -421,18 +437,19 @@ export async function updateDocumentMeta(
   }
 }
 
-/** Removes metadata, binary, and extracted text in one transaction. */
+/** Removes metadata, binary, extracted text, and chunks in one transaction. */
 export async function deleteDocument(id: string): Promise<void> {
   const db = await openDatabase();
 
   try {
     const transaction = db.transaction(
-      [META_STORE, BLOB_STORE, TEXT_STORE],
+      [META_STORE, BLOB_STORE, TEXT_STORE, CHUNKS_STORE],
       "readwrite",
     );
     transaction.objectStore(META_STORE).delete(id);
     transaction.objectStore(BLOB_STORE).delete(id);
     transaction.objectStore(TEXT_STORE).delete(id);
+    transaction.objectStore(CHUNKS_STORE).delete(id);
     await transactionToPromise(
       transaction,
       "Dokument konnte nicht gelöscht werden.",

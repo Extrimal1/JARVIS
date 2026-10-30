@@ -8,7 +8,9 @@ import {
   Loader2,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
+  Sparkles,
   Trash2,
   Upload,
   X,
@@ -20,7 +22,7 @@ import {
   MAX_FILE_SIZE,
   createDocumentId,
   deleteDocument,
-  extractText,
+
   formatBytes,
   formatUploadDate,
   getDocumentBlob,
@@ -28,13 +30,21 @@ import {
   isIndexedDBAvailable,
   listDocuments,
   saveDocument,
-  saveDocumentText,
+
   updateDocumentMeta,
   validateFile,
   type DocumentKind,
   type DocumentMeta,
   type ExtractionStatus,
 } from "@/src/lib/db/documents";
+import {
+  explainInDocument,
+  processDocument,
+  summarizeDocument,
+} from "@/src/lib/db/studyActions";
+import type { ProcessResponse } from "@/src/lib/study/protocol";
+import type { AssistantLocale } from "@/src/lib/assistant/actions";
+import { createId } from "@/src/lib/ids";
 import { DocumentPreview } from "@/src/components/study/DocumentPreview";
 import { CLOUD_ENABLED } from "@/src/lib/db/mode";
 
@@ -50,13 +60,35 @@ const KIND_FILTERS: { key: "all" | DocumentKind; label: string }[] = [
   { key: "all", label: "Alle Typen" },
   { key: "pdf", label: "PDF" },
   { key: "docx", label: "DOCX" },
+  { key: "pptx", label: "PPTX" },
   { key: "txt", label: "TXT" },
   { key: "md", label: "MD" },
 ];
 
 type LibraryStatus = "loading" | "ready" | "unavailable" | "error";
 
-export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
+type AiResult =
+  | {
+      kind: "summary";
+      text: string;
+      refsUsed: string[];
+      truncated: boolean;
+      chunkCount: number;
+    }
+  | {
+      kind: "explain";
+      text: string;
+      refsUsed: string[];
+      insufficient: boolean;
+    };
+
+export function DocumentLibrary({
+  subjects,
+  onSaveMaterial,
+}: {
+  subjects: Entry[];
+  onSaveMaterial: (entry: Entry) => Promise<void>;
+}) {
   const [status, setStatus] = useState<LibraryStatus>("loading");
   const [reloadKey, setReloadKey] = useState(0);
   const [docs, setDocs] = useState<DocumentMeta[]>([]);
@@ -78,7 +110,28 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
   const [editSubject, setEditSubject] = useState("");
   const [editDescription, setEditDescription] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [processingId, setProcessingId] = useState<string | null>(null);
+  const [aiOpenId, setAiOpenId] = useState<string | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiSaving, setAiSaving] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiQuestion, setAiQuestion] = useState("");
+  const [aiResult, setAiResult] = useState<AiResult | null>(null);
+  const [aiSaved, setAiSaved] = useState(false);
+  const [locale, setLocale] = useState<AssistantLocale>("de");
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    // Post-mount locale detection is intentional: reading navigator
+    // during render would mismatch SSR, so both render "de" first.
+    if (
+      typeof navigator !== "undefined" &&
+      navigator.language.toLowerCase().startsWith("ru")
+    ) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setLocale("ru");
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -239,7 +292,7 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
         subject: uploadSubject === "" ? null : uploadSubject,
         description: uploadDescription.trim(),
         uploadedAt: new Date().toISOString(),
-        extractionStatus: initialExtractionStatus(validation.value.kind),
+        extractionStatus: initialExtractionStatus(),
       };
 
       await saveDocument(meta, pendingFile);
@@ -248,18 +301,7 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
       setNotice(`„${meta.name}“ wurde hochgeladen.`);
       await refresh();
 
-      if (meta.kind === "txt" || meta.kind === "md") {
-        try {
-          await updateDocumentMeta(meta.id, { extractionStatus: "processing" });
-          await refresh();
-          const text = await extractText(meta.kind, savedFile);
-          await saveDocumentText(meta.id, text);
-        } catch {
-          await updateDocumentMeta(meta.id, { extractionStatus: "failed" });
-        } finally {
-          await refresh();
-        }
-      }
+      await runProcessing(meta, savedFile);
     } catch (saveError) {
       setPendingError(
         saveError instanceof Error ? saveError.message : "Upload fehlgeschlagen.",
@@ -300,6 +342,170 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
           ? editError.message
           : "Speichern fehlgeschlagen.",
       );
+    }
+  }
+
+  function reportProcessResult(docName: string, result: ProcessResponse) {
+    const suffix =
+      result.warnings.length > 0
+        ? ` Hinweise: ${result.warnings.join(" ")}`
+        : "";
+
+    if (result.status === "completed") {
+      setNotice(`„${docName}“ verarbeitet: ${result.message}${suffix}`);
+    } else {
+      setError(`„${docName}“: ${result.message}${suffix}`);
+    }
+  }
+
+  async function runProcessing(meta: DocumentMeta, blob: Blob | null) {
+    await updateDocumentMeta(meta.id, { extractionStatus: "processing" });
+    await refresh();
+
+    try {
+      const result = await processDocument(
+        meta.id,
+        meta.kind,
+        CLOUD_ENABLED ? null : blob,
+      );
+      reportProcessResult(meta.name, result);
+    } catch (processError) {
+      await updateDocumentMeta(meta.id, { extractionStatus: "failed" });
+      setError(
+        processError instanceof Error
+          ? processError.message
+          : "Verarbeitung fehlgeschlagen.",
+      );
+    } finally {
+      await refresh();
+    }
+  }
+
+  async function reprocessDoc(doc: DocumentMeta) {
+    if (processingId !== null) return;
+
+    setProcessingId(doc.id);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const blob = CLOUD_ENABLED ? null : await getDocumentBlob(doc.id);
+
+      if (!CLOUD_ENABLED && blob === null) {
+        setError(`Die Datei zu „${doc.name}“ fehlt im Speicher.`);
+        return;
+      }
+
+      await runProcessing(doc, blob);
+    } catch (reprocessError) {
+      setError(
+        reprocessError instanceof Error
+          ? reprocessError.message
+          : "Verarbeitung fehlgeschlagen.",
+      );
+    } finally {
+      setProcessingId(null);
+    }
+  }
+
+  function toggleAi(doc: DocumentMeta) {
+    if (aiOpenId === doc.id) {
+      setAiOpenId(null);
+    } else {
+      setAiOpenId(doc.id);
+      setAiResult(null);
+      setAiError(null);
+      setAiSaved(false);
+      setAiQuestion("");
+    }
+  }
+
+  async function summarizeDoc(doc: DocumentMeta) {
+    if (aiBusy) return;
+
+    setAiBusy(true);
+    setAiError(null);
+    setAiSaved(false);
+
+    try {
+      const result = await summarizeDocument(doc.id, locale);
+      setAiResult({
+        kind: "summary",
+        text: result.summary,
+        refsUsed: result.refsUsed,
+        truncated: result.truncated,
+        chunkCount: result.chunkCount,
+      });
+    } catch (summarizeError) {
+      setAiError(
+        summarizeError instanceof Error
+          ? summarizeError.message
+          : "Zusammenfassung fehlgeschlagen.",
+      );
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function askDoc(doc: DocumentMeta) {
+    const question = aiQuestion.trim();
+
+    if (aiBusy || question === "") return;
+
+    setAiBusy(true);
+    setAiError(null);
+    setAiSaved(false);
+
+    try {
+      const result = await explainInDocument(doc.id, question, locale);
+      setAiResult({
+        kind: "explain",
+        text: result.answer,
+        refsUsed: result.refsUsed,
+        insufficient: result.insufficient,
+      });
+    } catch (askError) {
+      setAiError(
+        askError instanceof Error
+          ? askError.message
+          : "Frage fehlgeschlagen.",
+      );
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function saveAiResult(doc: DocumentMeta) {
+    if (aiResult === null || aiSaving) return;
+
+    setAiSaving(true);
+
+    try {
+      const title =
+        aiResult.kind === "summary"
+          ? `Zusammenfassung: ${doc.name}`
+          : `Frage zu ${doc.name}`;
+      const refs =
+        aiResult.refsUsed.length > 0
+          ? `\n\nQuellen: ${aiResult.refsUsed.join("; ")}`
+          : "";
+
+      await onSaveMaterial({
+        id: createId(),
+        title,
+        detail: `${aiResult.text}${refs}`,
+        ...(doc.subject !== null ? { subject: doc.subject } : {}),
+      });
+      setAiSaved(true);
+      setNotice("Als Lernmaterial gespeichert.");
+    } catch (saveError) {
+      setAiError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Speichern fehlgeschlagen.",
+      );
+    } finally {
+      setAiSaving(false);
     }
   }
 
@@ -351,7 +557,9 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
           <h3 className="text-sm font-semibold text-slate-200">Dokumente</h3>
           <p className="mt-1 text-xs text-slate-500">
             {docs.length} {docs.length === 1 ? "Dokument" : "Dokumente"} ·
-            lokal im Browser gespeichert
+            {CLOUD_ENABLED
+              ? "in deiner privaten Cloud gespeichert"
+              : "lokal im Browser gespeichert"}
           </p>
         </div>
 
@@ -470,7 +678,7 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
                   ref={fileInputRef}
                   key={inputKey}
                   type="file"
-                  accept=".pdf,.docx,.txt,.md,.markdown"
+                  accept=".pdf,.docx,.pptx,.txt,.md,.markdown"
                   tabIndex={-1}
                   aria-hidden="true"
                   onChange={(change) => selectFile(change.target.files?.[0])}
@@ -480,7 +688,7 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
                   id="doc-upload-formats"
                   className="mt-3 text-xs text-slate-500"
                 >
-                  PDF, DOCX, TXT, MD · max. {formatBytes(MAX_FILE_SIZE)} pro
+                  PDF, DOCX, PPTX, TXT, MD · max. {formatBytes(MAX_FILE_SIZE)} pro
                   Datei
                 </p>
               </div>
@@ -628,8 +836,10 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
                   Noch keine Dokumente hochgeladen.
                 </p>
                 <p className="mx-auto mt-1 max-w-sm text-xs leading-5 text-slate-500">
-                  Lade Skripte und Notizen als PDF, DOCX, TXT oder MD hoch –
-                  sie bleiben lokal in deinem Browser gespeichert.
+                  Lade Skripte und Notizen als PDF, DOCX, PPTX, TXT oder MD hoch –
+                  {CLOUD_ENABLED
+                    ? "sie bleiben in deiner privaten Cloud gespeichert."
+                    : "sie bleiben lokal in deinem Browser gespeichert."}
                 </p>
                 {!uploadOpen && (
                   <button
@@ -689,6 +899,40 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
                           >
                             {EXTRACTION_STATUS_LABELS[doc.extractionStatus]}
                           </span>
+                        </div>
+
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          {doc.extractionStatus === "completed" && (
+                            <button
+                              onClick={() => toggleAi(doc)}
+                              aria-expanded={aiOpenId === doc.id}
+                              className="flex items-center gap-1.5 rounded-xl border border-cyan-300/25 bg-cyan-300/[0.06] px-3 py-1.5 text-xs text-cyan-200 transition hover:border-cyan-300/50"
+                            >
+                              <Sparkles size={13} />
+                              {aiOpenId === doc.id
+                                ? "KI-Bereich schließen"
+                                : "KI-Zusammenfassung & Fragen"}
+                            </button>
+                          )}
+                          {doc.extractionStatus !== "completed" && (
+                            <button
+                              onClick={() => reprocessDoc(doc)}
+                              disabled={processingId !== null}
+                              className="flex items-center gap-1.5 rounded-xl border border-white/10 px-3 py-1.5 text-xs text-slate-300 transition hover:border-cyan-300/30 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {processingId === doc.id ? (
+                                <Loader2
+                                  size={13}
+                                  className="motion-safe:animate-spin"
+                                />
+                              ) : (
+                                <RefreshCw size={13} />
+                              )}
+                              {processingId === doc.id
+                                ? "Wird verarbeitet …"
+                                : "Erneut verarbeiten"}
+                            </button>
+                          )}
                         </div>
 
                         {doc.description !== "" && (
@@ -781,6 +1025,92 @@ export function DocumentLibrary({ subjects }: { subjects: Entry[] }) {
                             Abbrechen
                           </button>
                         </div>
+                      </div>
+                    )}
+
+                    {aiOpenId === doc.id && (
+                      <div className="jarvis-fade mt-3 space-y-3 rounded-2xl border border-cyan-300/15 bg-cyan-300/[0.03] p-4">
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => summarizeDoc(doc)}
+                            disabled={aiBusy}
+                            className="flex items-center gap-1.5 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-medium text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <Sparkles size={13} />
+                            Zusammenfassen
+                          </button>
+                        </div>
+
+                        <div className="flex gap-2">
+                          <input
+                            value={aiQuestion}
+                            onChange={(change) =>
+                              setAiQuestion(change.target.value)
+                            }
+                            onKeyDown={(key) => {
+                              if (key.key === "Enter") void askDoc(doc);
+                            }}
+                            disabled={aiBusy}
+                            placeholder="Frage zum Dokument …"
+                            aria-label="Frage zum Dokument"
+                            maxLength={1000}
+                            className="min-w-0 flex-1 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-300/50 disabled:opacity-50"
+                          />
+                          <button
+                            onClick={() => askDoc(doc)}
+                            disabled={aiBusy || aiQuestion.trim() === ""}
+                            className="shrink-0 rounded-xl border border-cyan-300/25 px-4 py-2 text-xs text-cyan-200 transition hover:border-cyan-300/50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Fragen
+                          </button>
+                        </div>
+
+                        {aiBusy && (
+                          <p className="flex items-center gap-2 text-sm text-slate-400">
+                            <Loader2
+                              size={15}
+                              className="motion-safe:animate-spin"
+                            />
+                            KI arbeitet …
+                          </p>
+                        )}
+
+                        {aiError !== null && (
+                          <p role="alert" className="text-sm text-rose-300">
+                            {aiError}
+                          </p>
+                        )}
+
+                        {aiResult !== null && (
+                          <div className="rounded-xl border border-white/[0.06] bg-black/20 p-3">
+                            <p className="whitespace-pre-wrap text-sm leading-6 text-slate-200">
+                              {aiResult.text}
+                            </p>
+                            {aiResult.refsUsed.length > 0 && (
+                              <p className="mt-2 text-xs text-slate-500">
+                                Quellen: {aiResult.refsUsed.join("; ")}
+                              </p>
+                            )}
+                            {aiResult.kind === "summary" &&
+                              aiResult.truncated && (
+                                <p className="mt-1 text-xs text-amber-200/80">
+                                  Hinweis: Nur die ersten Abschnitte passten
+                                  in den KI-Kontext.
+                                </p>
+                              )}
+                            <button
+                              onClick={() => saveAiResult(doc)}
+                              disabled={aiSaving || aiSaved}
+                              className="mt-3 rounded-xl border border-white/10 px-4 py-2 text-xs text-slate-300 transition hover:border-cyan-300/30 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {aiSaving
+                                ? "Wird gespeichert …"
+                                : aiSaved
+                                  ? "Gespeichert"
+                                  : "Als Lernmaterial speichern"}
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )}
 

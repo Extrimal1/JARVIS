@@ -4,6 +4,7 @@ import {
   deleteStudyDoc,
   updateStudyDocMeta,
 } from "@/src/lib/api/modules/documents";
+import { deleteStudyDocChunks } from "@/src/lib/api/modules/studyIntel";
 import { dbFromAuth } from "@/src/lib/supabase/db";
 
 /** PATCH meta / DELETE (row + stored objects). */
@@ -54,6 +55,7 @@ export const DELETE = authed(async (_request, auth, route) => {
       return fail("bad-request", "Ungültige Anfrage.", 400);
     }
 
+    await deleteStudyDocChunks(db, id);
     const deleted = await deleteStudyDoc(db, id);
 
     if (!deleted) {

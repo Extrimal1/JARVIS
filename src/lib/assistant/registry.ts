@@ -1,10 +1,17 @@
 /**
  * Assistant tool registry: the integration boundary for a future model.
  *
- * Each entry describes one read-only tool — its purpose, inputs, output,
- * and permission. A future AI adapter may only call tools listed here,
+ * Each entry describes one tool — its purpose, inputs, output, and
+ * permission. A future AI adapter may only call tools listed here,
  * must validate inputs against the schema, and must never bypass the
  * tool functions in `./tools` (which re-validate everything).
+ *
+ * Write tools (`permission: "write"`) are proposals, not direct calls:
+ * the model emits an `AssistantPlan` (see `./actions`), the client
+ * executor validates it, resolves targets against the user's loaded
+ * data, confirms destructive actions, and runs the write through the
+ * existing app stores. RequiresKeys is empty for writes — they never
+ * read storage directly.
  */
 
 export type ToolPermission = "read" | "write";
@@ -76,6 +83,36 @@ export const ASSISTANT_TOOLS: ToolDefinition[] = [
       },
     ],
     output: "UpcomingEvents",
+    requiresKeys: ["jarvis-calendar-events"],
+  },
+  {
+    id: "calendar.list",
+    title: "Termine im Zeitraum",
+    description:
+      "Kalendereinträge zwischen zwei Tagen (YYYY-MM-DD, Standard heute). Vergangene Zeiträume sind erlaubt.",
+    permission: "read",
+    inputs: [
+      {
+        name: "events",
+        type: "CalendarEvent[]",
+        required: true,
+        description: "Validierte Kalenderdaten.",
+      },
+      TODAY_FIELD,
+      {
+        name: "from",
+        type: "string?",
+        required: false,
+        description: "Starttag (YYYY-MM-DD).",
+      },
+      {
+        name: "to",
+        type: "string?",
+        required: false,
+        description: "Endtag (YYYY-MM-DD).",
+      },
+    ],
+    output: "CalendarList",
     requiresKeys: ["jarvis-calendar-events"],
   },
   {
@@ -214,6 +251,53 @@ export const ASSISTANT_TOOLS: ToolDefinition[] = [
     requiresKeys: ["jarvis-finance"],
   },
   {
+    id: "finance.list",
+    title: "Neueste Buchungen",
+    description:
+      "Neueste Buchungen aller Währungen (nur Anzeige, ohne Umrechnung und ohne Kontodaten).",
+    permission: "read",
+    inputs: [
+      {
+        name: "finance",
+        type: "FinanceData",
+        required: true,
+        description: "Validierte Finanzdaten.",
+      },
+      {
+        name: "limit",
+        type: "number?",
+        required: false,
+        description: "Max. Anzahl (1–50, Standard 10).",
+      },
+    ],
+    output: "RecentTransaction[]",
+    requiresKeys: ["jarvis-finance"],
+  },
+  {
+    id: "finance.summary",
+    title: "Finanzübersicht",
+    description:
+      "Einnahmen und Ausgaben eines Monats (Standard: aktueller Monat). Fremdwährungen werden gezählt, aber nicht umgerechnet.",
+    permission: "read",
+    inputs: [
+      {
+        name: "finance",
+        type: "FinanceData",
+        required: true,
+        description: "Finanzdaten; ungültige werden als leer gewertet.",
+      },
+      TODAY_FIELD,
+      {
+        name: "monthKey",
+        type: "string?",
+        required: false,
+        description: "Monat als YYYY-MM (Standard: aktueller Monat).",
+      },
+    ],
+    output: "FinanceMonthSummary",
+    requiresKeys: ["jarvis-finance"],
+  },
+  {
     id: "lifestyle.preferences",
     title: "Freizeit-Vorlieben",
     description:
@@ -287,6 +371,119 @@ export const ASSISTANT_TOOLS: ToolDefinition[] = [
     ],
     output: "ApprovedMemory",
     requiresKeys: ["jarvis-memory"],
+  },
+  {
+    id: "calendar.create",
+    title: "Termin erstellen",
+    description:
+      "Erstellt einen Kalendereintrag über den App-Store (sofort, mit Undo). Nur als AssistantPlan vorschlagen; Ausführung, Validierung und Konflikt-Hinweis übernimmt der Executor.",
+    permission: "write",
+    inputs: [
+      {
+        name: "event",
+        type: "NewEventFields",
+        required: true,
+        description: "Titel, Datum (YYYY-MM-DD), Start/Ende (HH:MM), Typ, Ort.",
+      },
+    ],
+    output: "CalendarEvent",
+    requiresKeys: [],
+  },
+  {
+    id: "calendar.update",
+    title: "Termin ändern",
+    description:
+      "Ändert einen bestehenden Termin nach Nutzer-Bestätigung. Nur als AssistantPlan mit unscharfer Referenz vorschlagen; der Executor löst das Ziel auf und fragt bei Mehrdeutigkeit nach.",
+    permission: "write",
+    inputs: [
+      {
+        name: "ref",
+        type: "EventRef",
+        required: true,
+        description: "Titel-Suchtext, optional Datum.",
+      },
+      {
+        name: "patch",
+        type: "EventPatch",
+        required: true,
+        description: "Zu ändernde Felder (mind. eines).",
+      },
+    ],
+    output: "CalendarEvent",
+    requiresKeys: [],
+  },
+  {
+    id: "calendar.delete",
+    title: "Termin löschen",
+    description:
+      "Löscht einen Termin erst nach expliziter Bestätigung (mit Undo per Wiederherstellen). Nur als AssistantPlan vorschlagen.",
+    permission: "write",
+    inputs: [
+      {
+        name: "ref",
+        type: "EventRef",
+        required: true,
+        description: "Titel-Suchtext, optional Datum.",
+      },
+    ],
+    output: "DeletedEvent",
+    requiresKeys: [],
+  },
+  {
+    id: "finance.create",
+    title: "Buchung speichern",
+    description:
+      "Speichert eine Einnahme/Ausgabe über den Finanz-Store (sofort, mit Undo). Betrag in Cent, Kategorie aus den App-Kategorien, ISO-Währung.",
+    permission: "write",
+    inputs: [
+      {
+        name: "transaction",
+        type: "NewTransactionFields",
+        required: true,
+        description: "Titel, Cent-Betrag, Typ, Kategorie, Datum, Währung.",
+      },
+    ],
+    output: "Transaction",
+    requiresKeys: [],
+  },
+  {
+    id: "study.documents",
+    title: "Dokumente auflisten",
+    description:
+      "Listet die hochgeladenen Dokumente des Nutzers mit Name, Art und Verarbeitungsstatus.",
+    permission: "read",
+    inputs: [],
+    output: "StudyDocuments",
+    requiresKeys: [],
+  },
+  {
+    id: "study.retrieve",
+    title: "In Unterlagen suchen",
+    description:
+      "Sucht in den verarbeiteten Dokumenten des Nutzers nach Textstellen zur Frage. Gibt nummerierte Quellen [Q1]… mit Dokumentname, Seiten-/Folienangabe und Textauszug zurück — nur diese Angaben zitieren, nichts erfinden.",
+    permission: "read",
+    inputs: [
+      {
+        name: "query",
+        type: "string",
+        required: true,
+        description: "Suchfrage oder Stichwörter (1–500 Zeichen).",
+      },
+      {
+        name: "documentId",
+        type: "string?",
+        required: false,
+        description: "Sucht nur in diesem Dokument (id aus study.documents).",
+      },
+      {
+        name: "limit",
+        type: "number?",
+        required: false,
+        description: "Max. Quellen (1–10, Standard 5).",
+      },
+    ],
+    output: "StudyRetrieval",
+    requiresKeys: [],
   },
 ];
 

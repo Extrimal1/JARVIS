@@ -34,6 +34,9 @@ const KIND_MIMES: Record<DocumentKind, string[]> = {
   docx: [
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   ],
+  pptx: [
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ],
   txt: ["text/plain"],
   md: ["text/markdown", "text/plain"],
 };
@@ -41,6 +44,7 @@ const KIND_MIMES: Record<DocumentKind, string[]> = {
 const KIND_EXTENSIONS: Record<DocumentKind, string[]> = {
   pdf: ["pdf"],
   docx: ["docx"],
+  pptx: ["pptx"],
   txt: ["txt"],
   md: ["md", "markdown", "txt"],
 };
@@ -56,7 +60,7 @@ export function sanitizeFileName(name: string): string {
 function detectKind(name: string, mime: string): DocumentKind | null {
   const ext = (name.split(".").pop() ?? "").toLowerCase();
 
-  for (const kind of ["pdf", "docx", "txt", "md"] as const) {
+  for (const kind of ["pdf", "docx", "pptx", "txt", "md"] as const) {
     if (
       KIND_EXTENSIONS[kind].includes(ext) &&
       (KIND_MIMES[kind].includes(mime) || mime === "application/octet-stream")
@@ -182,7 +186,7 @@ export async function createStudyDoc(
         kind,
         subject: input.subject,
         description: input.description,
-        extraction_status: initialExtractionStatus(kind),
+        extraction_status: initialExtractionStatus(),
         storage_path: storagePath,
         text_path: "",
       },

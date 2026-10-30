@@ -14,6 +14,7 @@ import {
   LogOut,
   Menu,
   Mic,
+  Sparkles,
   Wallet,
   X,
 } from "lucide-react";
@@ -21,6 +22,7 @@ import { useLockBodyScroll } from "@/src/hooks/useLockBodyScroll";
 
 const links = [
   { href: "/", label: "Übersicht", icon: Activity },
+  { href: "/assistant", label: "Assistent", icon: Sparkles },
   { href: "/study", label: "Studium & Wissen", icon: BookOpen },
   { href: "/calendar", label: "Terminplaner", icon: CalendarDays },
   { href: "/finance", label: "Finanzen", icon: Wallet },

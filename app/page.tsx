@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
-  ArrowUpRight,
   BookOpen,
   Brain,
   CalendarDays,
@@ -21,6 +20,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import Sidebar from "@/src/components/Sidebar";
+import { ConversationPanel } from "@/src/components/conversation/ConversationPanel";
 import { WeatherCard } from "@/src/components/weather/WeatherCard";
 import { useToday } from "@/src/hooks/useToday";
 import { EVENT_TYPE_STYLES } from "@/src/lib/calendar";
@@ -178,8 +178,6 @@ export default function Home() {
   const financeIncome = financeSummary?.incomeCents ?? 0;
   const financeSpent = financeSummary?.expenseCents ?? 0;
   const financeTxCount = financeSummary?.txCount ?? 0;
-  const [command, setCommand] = useState("");
-  const [message, setMessage] = useState("");
   const [greeting, setGreeting] = useState("Willkommen.");
   const [currentTime, setCurrentTime] = useState("");
   const [showTaskForm, setShowTaskForm] = useState(false);
@@ -209,16 +207,6 @@ const [newTaskPriority, setNewTaskPriority] =
   }, []);
 
   const completed = tasks.filter((task) => task.done).length;
-
-  function submitCommand() {
-    if (!command.trim()) return;
-
-    setMessage(
-      `Anfrage empfangen: „${command.trim()}“. Die KI-Anbindung folgt im nächsten Entwicklungsschritt.`
-    );
-
-    setCommand("");
-  }
 
   async function addTask() {
   if (!newTaskTitle.trim()) return;
@@ -289,55 +277,17 @@ const [newTaskPriority, setNewTaskPriority] =
                   Was möchtest du heute erledigen?
                 </p>
 
-                <div className="mt-8 flex items-center gap-3 rounded-2xl border border-white/10 bg-black/20 p-2">
-                  <Sparkles
-                    className="ml-2 shrink-0 text-cyan-300"
-                    size={19}
+                <div className="mt-8">
+                  <ConversationPanel
+                    module="dashboard"
+                    variant="compact"
+                    initialTasks={initialTasks}
+                    suggestions={[
+                      "Plane meinen Tag",
+                      "Erkläre mir Java",
+                      "Zeige meine Aufgaben",
+                    ]}
                   />
-
-                  <input
-                    value={command}
-                    onChange={(event) => setCommand(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") submitCommand();
-                    }}
-                    placeholder="Stelle JARVIS eine Frage ..."
-                    aria-label="Nachricht an JARVIS"
-                    className="min-w-0 flex-1 bg-transparent py-3 text-sm outline-none placeholder:text-slate-600"
-                  />
-
-                  <button
-                    onClick={submitCommand}
-                    aria-label="Anfrage senden"
-                    className="jarvis-press rounded-xl bg-cyan-300 p-3 text-slate-950 transition hover:bg-cyan-200"
-                  >
-                    <ArrowUpRight size={19} />
-                  </button>
-                </div>
-
-                {message && (
-                  <p
-                    role="status"
-                    className="mt-4 rounded-xl border border-cyan-300/15 bg-cyan-300/5 p-3 text-sm text-cyan-100"
-                  >
-                    {message}
-                  </p>
-                )}
-
-                <div className="mt-5 flex flex-wrap gap-2">
-                  {[
-                    "Plane meinen Tag",
-                    "Erkläre mir Java",
-                    "Zeige meine Aufgaben",
-                  ].map((suggestion) => (
-                    <button
-                      key={suggestion}
-                      onClick={() => setCommand(suggestion)}
-                      className="rounded-full border border-white/10 px-3 py-2 text-xs text-slate-400 transition hover:border-cyan-300/40 hover:text-cyan-200"
-                    >
-                      {suggestion}
-                    </button>
-                  ))}
                 </div>
               </div>
             </section>
@@ -365,17 +315,13 @@ const [newTaskPriority, setNewTaskPriority] =
                 Ich bin bereit für deine Anweisungen.
               </p>
 
-              <button
-                onClick={() =>
-                  setMessage(
-                    "Der Sprachmodus wird in einem späteren Entwicklungsschritt integriert."
-                  )
-                }
+              <Link
+                href="/assistant"
                 className="mt-5 flex items-center gap-2 rounded-full border border-cyan-300/25 px-5 py-3 text-sm text-cyan-200 transition hover:bg-cyan-300/10"
               >
                 <Mic size={17} />
                 Sprachmodus
-              </button>
+              </Link>
             </section>
           </div>
 
