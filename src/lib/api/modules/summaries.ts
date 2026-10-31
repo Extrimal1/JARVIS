@@ -55,6 +55,14 @@ function isLabelList(value: unknown): value is string[] {
   );
 }
 
+function isSplitMap(value: unknown): value is Record<string, number> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  return Object.values(value).every((depth) => typeof depth === "number");
+}
+
 export function summaryRowToDomain(row: Record<string, unknown>): unknown {
   const hasActive =
     typeof row.active_final_md === "string" && row.active_final_md !== "";
@@ -84,6 +92,7 @@ export function summaryRowToDomain(row: Record<string, unknown>): unknown {
             ? row.draft_planned
             : [],
           spans: isSpanResultList(row.draft_spans) ? row.draft_spans : [],
+          splits: isSplitMap(row.draft_splits) ? row.draft_splits : {},
           preview:
             typeof row.draft_preview_md === "string" &&
             row.draft_preview_md !== ""
@@ -113,6 +122,7 @@ export function summaryToDbRow(item: SummaryRecord): Record<string, unknown> {
     draft_generation_id: item.draft?.generationId ?? null,
     draft_planned: item.draft?.plannedSpans ?? [],
     draft_spans: item.draft?.spans ?? [],
+    draft_splits: item.draft?.splits ?? {},
     draft_preview_md: item.draft?.preview?.text ?? "",
     draft_preview_refs: item.draft?.preview?.refs ?? [],
     draft_started_at: item.draft?.startedAt ?? null,

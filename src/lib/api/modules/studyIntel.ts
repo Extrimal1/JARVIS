@@ -67,17 +67,20 @@ import {
   type SynthesizeResponse,
 } from "@/src/lib/study/protocol";
 import {
+  SUMMARY_SPAN_BUDGET_CHARS,
   coverageStats,
   groupChunksByUnit,
+  markCoveredGroups,
   planSummarySweep,
   selectQuestionWindow,
   targetQuestionCount,
 } from "@/src/lib/study/coverage";
 import {
+  containingBaseSpan,
   groupSectionsForReduction,
   orderSpansForSynthesis,
+  pruneStaleSpans,
   resolveMarkersToLabels,
-  spanUnitCounts,
   validateSynthesisRefs,
 } from "@/src/lib/study/summaries";
 import { summaryRowToDomain } from "./summaries";
@@ -429,7 +432,7 @@ async function groundedChat(
   );
 }
 
-function toGroundedSources(
+export function toGroundedSources(
   chunks: { text: string; refLabel: string; documentName: string }[],
 ): GroundedSource[] {
   return chunks.map((chunk, index) => ({
@@ -1077,8 +1080,19 @@ export async function getStudyCoverage(
 /** Summary planning reads every stored chunk (coverage needs all). */
 const SUMMARY_SCAN_LIMIT = MAX_CHUNKS_PER_DOC;
 
-/** Batch summaries keep the legacy per-call output budget. */
-const SUMMARY_BATCH_NUM_PREDICT = 1200;
+/**
+ * Batch output budget. Raised from 1200 after production logs
+ * showed repeated done_reason=length at 1200: a 4000-char span
+ * (~1100 input tokens) plus the detail-demanding prompt makes
+ * Qwen exceed 1200 output tokens. 2000 (≈6000 chars) covers
+ * thorough span summaries with headroom while staying far below
+ * context; structural oversize is handled by splitting, not by
+ * blindly raising this further.
+ */
+const SUMMARY_BATCH_NUM_PREDICT = 2000;
+
+/** Truncation retries per batch call (each retry splits deeper). */
+const MAX_BATCH_ATTEMPTS = 8;
 
 /** Final synthesis over span texts (explicit, see plan). */
 const SYNTHESIZE_NUM_PREDICT = 2000;
@@ -1167,6 +1181,7 @@ type SummaryRowShape = {
   generationId: string | null;
   planned: { key: string; label: string; order: number }[];
   spans: SummarySpanResult[];
+  splits: Record<string, number>;
   hasActive: boolean;
 };
 
@@ -1176,6 +1191,7 @@ function readSummaryRow(row: Record<string, unknown>): SummaryRowShape {
       generationId?: unknown;
       plannedSpans?: unknown;
       spans?: unknown;
+      splits?: unknown;
     } | null;
     active?: unknown;
   };
@@ -1185,6 +1201,12 @@ function readSummaryRow(row: Record<string, unknown>): SummaryRowShape {
   const spans = Array.isArray(domain.draft?.spans)
     ? (domain.draft.spans as SummarySpanResult[])
     : [];
+  const splits =
+    typeof domain.draft?.splits === "object" &&
+    domain.draft.splits !== null &&
+    !Array.isArray(domain.draft.splits)
+      ? (domain.draft.splits as Record<string, number>)
+      : {};
 
   return {
     id: typeof row.id === "string" ? row.id : "",
@@ -1194,6 +1216,7 @@ function readSummaryRow(row: Record<string, unknown>): SummaryRowShape {
         : null,
     planned,
     spans,
+    splits,
     hasActive: domain.active !== null && domain.active !== undefined,
   };
 }
@@ -1215,7 +1238,7 @@ async function loadSummaryRow(
   return rows[0] ?? null;
 }
 
-async function loadOrderedChunks(
+export async function loadOrderedChunks(
   db: DbClient,
   documentId: string,
 ): Promise<{ index: number; text: string; refs: SourceRef[] }[]> {
@@ -1259,6 +1282,11 @@ async function synthesisChat(messages: LlmMessage[]): Promise<string> {
  * A null generation starts a replacement draft; the active
  * summary is never touched here — promotion happens only in
  * `synthesizeSummary` after a complete synthesis.
+ *
+ * Truncation recovery: a span cut off by the token limit is
+ * subdivided (persisted splits) and retried smaller within this
+ * call, bounded by MAX_BATCH_ATTEMPTS. Successful spans are
+ * never regenerated; incomplete output is never persisted.
  */
 export async function summarizeNextSpan(
   db: DbClient,
@@ -1285,9 +1313,9 @@ export async function summarizeNextSpan(
   const documentName =
     typeof row.name === "string" && row.name !== "" ? row.name : "Dokument";
   const chunks = await loadOrderedChunks(db, input.documentId);
-  const plan = planSummarySweep(groupChunksByUnit(chunks));
+  const base = planSummarySweep(chunks);
 
-  if (plan.length === 0) {
+  if (base.length === 0) {
     return {
       ok: false,
       http: 409,
@@ -1297,18 +1325,20 @@ export async function summarizeNextSpan(
 
   const stored = await loadSummaryRow(db, input.documentId);
   const current = stored === null ? null : readSummaryRow(stored);
-  const planned = plan.map((span, order) => ({
-    key: span.key,
-    label: span.label,
-    order,
-  }));
-  const planKeys = new Set(plan.map((span) => span.key));
   let generationId = input.generationId;
   let effective: SummarySpanResult[] = [];
+  let splits: Record<string, number> = {};
   let rowId = current?.id ?? "";
+  const hasActive =
+    stored !== null && current !== null && current.hasActive;
 
   if (generationId === null) {
     generationId = createId();
+    const planned = base.map((span, order) => ({
+      key: span.key,
+      label: span.label,
+      order,
+    }));
 
     if (stored === null || current === null) {
       rowId = createId();
@@ -1321,6 +1351,7 @@ export async function summarizeNextSpan(
           draft_generation_id: generationId,
           draft_planned: planned,
           draft_spans: [],
+          draft_splits: {},
           draft_started_at: new Date().toISOString(),
         },
       ]);
@@ -1330,6 +1361,7 @@ export async function summarizeNextSpan(
         draft_generation_id: generationId,
         draft_planned: planned,
         draft_spans: [],
+        draft_splits: {},
         draft_preview_md: "",
         draft_preview_refs: [],
         draft_started_at: new Date().toISOString(),
@@ -1349,127 +1381,178 @@ export async function summarizeNextSpan(
       };
     }
 
-    effective = current.spans.filter((span) => planKeys.has(span.key));
+    splits = { ...current.splits };
+    effective = pruneStaleSpans(
+      base.flatMap((span) => span.units),
+      current.spans,
+    );
   }
 
-  const doneKeys = new Set(effective.map((span) => span.key));
-  const nextIndex = plan.findIndex((span) => !doneKeys.has(span.key));
+  for (let attempt = 1; attempt <= MAX_BATCH_ATTEMPTS; attempt += 1) {
+    const plan = planSummarySweep(chunks, SUMMARY_SPAN_BUDGET_CHARS, splits);
+    const labels = effective.map((span) => span.label);
+    const nextIndex = markCoveredGroups(plan, labels).findIndex(
+      (covered) => !covered,
+    );
 
-  if (nextIndex === -1) {
-    const progress = spanUnitCounts(plan, [...doneKeys]);
+    if (nextIndex === -1) {
+      const progress = coverageStats(plan, labels);
 
-    if (stored !== null && current !== null) {
-      await dbUpdate(db, "study_summaries", current.id, {
-        draft_planned: planned,
+      await dbUpdate(db, "study_summaries", rowId, {
+        draft_planned: plan.map((span, order) => ({
+          key: span.key,
+          label: span.label,
+          order,
+        })),
         draft_spans: effective,
+        draft_splits: splits,
       });
+
+      return {
+        ok: true,
+        response: {
+          documentId: input.documentId,
+          generationId,
+          span: {
+            key: "",
+            label: "",
+            index: plan.length,
+            total: plan.length,
+          },
+          text: "",
+          refs: [],
+          processedUnits: progress.coveredUnits,
+          usableUnits: progress.usableUnits,
+          percent: progress.percent,
+          done: true,
+          attempts: attempt - 1,
+        },
+      };
     }
+
+    const next = plan[nextIndex] as (typeof plan)[number];
+    const wanted = new Set(next.chunkIndices);
+    const picked = chunks.filter((chunk) => wanted.has(chunk.index));
+    const sources = toGroundedSources(
+      picked.map((chunk) => ({
+        text: chunk.text,
+        refLabel: formatSourceRefs(chunk.refs),
+        documentName,
+      })),
+    );
+
+    let raw: string;
+
+    try {
+      const chat = await groundedAnswer(
+        async (callMessages) => {
+          const result = await chatWithOllama(callMessages, {
+            temperature: 0,
+            numPredict: SUMMARY_BATCH_NUM_PREDICT,
+          });
+
+          assertCompleteQuestions({
+            content: result.content,
+            doneReason: result.doneReason,
+            evalCount: result.evalCount,
+            thinkingChars: result.thinkingChars,
+          });
+
+          return result.content;
+        },
+        batchSummaryPrompt(input.locale, documentName, next.label, sources),
+        toCitationSources(sources),
+        input.locale,
+      );
+
+      raw = chat.text;
+    } catch (error: unknown) {
+      if (!(error instanceof QuestionsTruncatedError)) throw error;
+
+      if (next.chunkIndices.length <= 1) {
+        return {
+          ok: false,
+          http: 409,
+          message:
+            "Selbst der kleinste Abschnitt wurde abgeschnitten — der Entwurf bleibt gespeichert, bitte später erneut versuchen.",
+        };
+      }
+
+      const baseKey = containingBaseSpan(base, next);
+
+      if (baseKey === null) throw error;
+
+      splits[baseKey] = (splits[baseKey] ?? 0) + 1;
+
+      await dbUpdate(db, "study_summaries", rowId, {
+        draft_spans: effective,
+        draft_splits: splits,
+      });
+
+      console.log(
+        `[api:study] summary-split doc=${input.documentId} gen=${generationId} base=${baseKey} depth=${splits[baseKey]} attempt=${attempt}`,
+      );
+
+      continue;
+    }
+
+    const resolved = resolveMarkersToLabels(raw, sources);
+    const completed: SummarySpanResult = {
+      key: next.key,
+      label: next.label,
+      text: resolved.text,
+      refs: resolved.refs,
+      completedAt: new Date().toISOString(),
+    };
+    const updated = [...effective, completed];
+    const planAfter = planSummarySweep(chunks, SUMMARY_SPAN_BUDGET_CHARS, splits);
+    const progress = coverageStats(
+      planAfter,
+      updated.map((span) => span.label),
+    );
+
+    await dbUpdate(db, "study_summaries", rowId, {
+      status: hasActive ? "complete" : "partial",
+      draft_planned: planAfter.map((span, order) => ({
+        key: span.key,
+        label: span.label,
+        order,
+      })),
+      draft_spans: updated,
+      draft_splits: splits,
+    });
+
+    console.log(
+      `[api:study] summary-batch doc=${input.documentId} gen=${generationId} span=${next.key} units=${progress.coveredUnits}/${progress.usableUnits} attempts=${attempt}`,
+    );
 
     return {
       ok: true,
       response: {
         documentId: input.documentId,
         generationId,
-        span: { key: "", label: "", index: plan.length, total: plan.length },
-        text: "",
-        refs: [],
-        processedUnits: progress.processedUnits,
+        span: {
+          key: next.key,
+          label: next.label,
+          index: nextIndex,
+          total: planAfter.length,
+        },
+        text: completed.text,
+        refs: completed.refs,
+        processedUnits: progress.coveredUnits,
         usableUnits: progress.usableUnits,
         percent: progress.percent,
-        done: true,
+        done: false,
+        attempts: attempt,
       },
     };
   }
 
-  const next = plan[nextIndex] as (typeof plan)[number];
-  const wanted = new Set(next.chunkIndices);
-  const picked = chunks.filter((chunk) => wanted.has(chunk.index));
-  const sources = toGroundedSources(
-    picked.map((chunk) => ({
-      text: chunk.text,
-      refLabel: formatSourceRefs(chunk.refs),
-      documentName,
-    })),
-  );
-
-  let raw: string;
-
-  try {
-    const chat = await groundedAnswer(
-      async (callMessages) => {
-        const result = await chatWithOllama(callMessages, {
-          temperature: 0,
-          numPredict: SUMMARY_BATCH_NUM_PREDICT,
-        });
-
-        assertCompleteQuestions({
-          content: result.content,
-          doneReason: result.doneReason,
-          evalCount: result.evalCount,
-          thinkingChars: result.thinkingChars,
-        });
-
-        return result.content;
-      },
-      batchSummaryPrompt(input.locale, documentName, next.label, sources),
-      toCitationSources(sources),
-      input.locale,
-    );
-
-    raw = chat.text;
-  } catch (error: unknown) {
-    if (error instanceof QuestionsTruncatedError) {
-      throw new ProviderError("truncated", error.message);
-    }
-
-    throw error;
-  }
-
-  const resolved = resolveMarkersToLabels(raw, sources);
-  const completed: SummarySpanResult = {
-    key: next.key,
-    label: next.label,
-    text: resolved.text,
-    refs: resolved.refs,
-    completedAt: new Date().toISOString(),
-  };
-  const updated = [...effective, completed];
-  const progress = spanUnitCounts(
-    plan,
-    updated.map((span) => span.key),
-  );
-
-  const hasActive =
-    stored !== null && current !== null && current.hasActive;
-
-  await dbUpdate(db, "study_summaries", rowId, {
-    status: hasActive ? "complete" : "partial",
-    draft_planned: planned,
-    draft_spans: updated,
-  });
-
-  console.log(
-    `[api:study] summary-batch doc=${input.documentId} gen=${generationId} span=${next.key} units=${progress.processedUnits}/${progress.usableUnits}`,
-  );
-
   return {
-    ok: true,
-    response: {
-      documentId: input.documentId,
-      generationId,
-      span: {
-        key: next.key,
-        label: next.label,
-        index: nextIndex,
-        total: plan.length,
-      },
-      text: completed.text,
-      refs: completed.refs,
-      processedUnits: progress.processedUnits,
-      usableUnits: progress.usableUnits,
-      percent: progress.percent,
-      done: false,
-    },
+    ok: false,
+    http: 409,
+    message:
+      "Der Abschnitt wurde wiederholt abgeschnitten — der Entwurf bleibt gespeichert, bitte erneut versuchen.",
   };
 }
 
@@ -1517,7 +1600,9 @@ export async function synthesizeSummary(
   }
 
   const plan = planSummarySweep(
-    groupChunksByUnit(await loadOrderedChunks(db, input.documentId)),
+    await loadOrderedChunks(db, input.documentId),
+    SUMMARY_SPAN_BUDGET_CHARS,
+    current.splits,
   );
 
   if (plan.length === 0) {
@@ -1528,8 +1613,10 @@ export async function synthesizeSummary(
     };
   }
 
-  const planKeys = new Set(plan.map((span) => span.key));
-  const effective = current.spans.filter((span) => planKeys.has(span.key));
+  const effective = pruneStaleSpans(
+    plan.flatMap((span) => span.units),
+    current.spans,
+  );
 
   if (effective.length === 0) {
     return {
@@ -1539,7 +1626,8 @@ export async function synthesizeSummary(
     };
   }
 
-  const complete = effective.length === plan.length;
+  const labels = effective.map((span) => span.label);
+  const complete = markCoveredGroups(plan, labels).every(Boolean);
   const ordered = orderSpansForSynthesis(effective);
   let sections = ordered.map((span) => ({
     label: span.label,
@@ -1601,6 +1689,7 @@ export async function synthesizeSummary(
         draft_generation_id: null,
         draft_planned: [],
         draft_spans: [],
+        draft_splits: {},
         draft_preview_md: "",
         draft_preview_refs: [],
         draft_started_at: null,

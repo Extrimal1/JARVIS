@@ -177,6 +177,7 @@ export function DocumentLibrary({
     percent: number;
     processedUnits: number;
     usableUnits: number;
+    attempts: number;
   } | null>(null);
   const [summaryById, setSummaryById] = useState<
     Record<string, DocumentSummary>
@@ -640,6 +641,7 @@ export function DocumentLibrary({
       percent: 0,
       processedUnits: 0,
       usableUnits: 0,
+      attempts: 0,
     });
     setAiError(null);
     setAiSaved(false);
@@ -1571,7 +1573,7 @@ export function DocumentLibrary({
                             <p className="min-w-0 flex-1 text-xs text-slate-400">
                               {sProgress.total === 0
                                 ? "Zusammenfassung · Stapel werden geplant …"
-                                : `Zusammenfassung · Stapel ${sProgress.index + 1}/${sProgress.total} · ${sProgress.label} · ${sProgress.processedUnits}/${sProgress.usableUnits} ${UNIT_NOUNS[doc.kind]} (${sProgress.percent} %)`}
+                                : `Zusammenfassung · Stapel ${sProgress.index + 1}/${sProgress.total} · ${sProgress.label} · ${sProgress.processedUnits}/${sProgress.usableUnits} ${UNIT_NOUNS[doc.kind]} (${sProgress.percent} %) · Versuch ${Math.max(sProgress.attempts, 1)}`}
                             </p>
                             <button
                               onClick={cancelSummary}

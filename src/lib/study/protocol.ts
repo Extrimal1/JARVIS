@@ -307,6 +307,8 @@ export type DocumentSummary = {
     spans: SummarySpanResult[];
     preview: { text: string; refs: string[] } | null;
     startedAt: string;
+    /** Truncation splits per base span key (absent = none). */
+    splits?: Record<string, number>;
   } | null;
 };
 
@@ -342,7 +344,13 @@ export function isDocumentSummary(value: unknown): value is DocumentSummary {
             Array.isArray(
               (draft.preview as Record<string, unknown>).refs,
             ))) &&
-        typeof draft.startedAt === "string"))
+        typeof draft.startedAt === "string" &&
+        (draft.splits === undefined ||
+          (typeof draft.splits === "object" &&
+            draft.splits !== null &&
+            Object.values(draft.splits).every(
+              (depth) => typeof depth === "number",
+            )))))
   );
 }
 
@@ -374,6 +382,8 @@ export type SummarizeBatchResponse = {
   percent: number;
   /** True when every planned span already persisted (nothing to do). */
   done: boolean;
+  /** Model calls spent on this span (1 + truncation retries). */
+  attempts: number;
 };
 
 export function isSummarizeBatchResponse(
@@ -399,7 +409,8 @@ export function isSummarizeBatchResponse(
     typeof record.processedUnits === "number" &&
     typeof record.usableUnits === "number" &&
     typeof record.percent === "number" &&
-    typeof record.done === "boolean"
+    typeof record.done === "boolean" &&
+    typeof record.attempts === "number"
   );
 }
 
@@ -538,6 +549,89 @@ export function processResponseOfExtractError(
     warnings: [],
     message: error.message,
   };
+}
+
+/** One extracted topic over the wire (labels validated server-side). */
+export type ExtractedTopicDto = {
+  name: string;
+  summary: string;
+  concepts: string[];
+  formulas: { text: string; variables: string[] }[];
+  examples: string[];
+  prerequisites: string[];
+  parent: string | null;
+  refs: string[];
+};
+
+export function isExtractedTopicDto(
+  value: unknown,
+): value is ExtractedTopicDto {
+  if (typeof value !== "object" || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+  const strings = (input: unknown): input is string[] =>
+    Array.isArray(input) &&
+    input.every((entry): entry is string => typeof entry === "string");
+
+  return (
+    typeof record.name === "string" &&
+    typeof record.summary === "string" &&
+    strings(record.concepts) &&
+    Array.isArray(record.formulas) &&
+    record.formulas.every((formula) => {
+      if (typeof formula !== "object" || formula === null) return false;
+
+      const item = formula as Record<string, unknown>;
+
+      return typeof item.text === "string" && strings(item.variables);
+    }) &&
+    strings(record.examples) &&
+    strings(record.prerequisites) &&
+    (record.parent === null || typeof record.parent === "string") &&
+    strings(record.refs)
+  );
+}
+
+export type TopicsExtractResponse = {
+  documentId: string;
+  documentName: string;
+  /** Sweep spans processed by this call (bounded). */
+  spansDone: string[];
+  /** Spans that truncated or failed parsing (retryable later). */
+  skippedSpans: string[];
+  topics: ExtractedTopicDto[];
+  droppedInvalid: number;
+  droppedUngrounded: number;
+  repaired: boolean;
+  /** True when no usable chunks existed (no LLM call happened). */
+  insufficient: boolean;
+  /** True when every sweep span is done or skipped. */
+  done: boolean;
+};
+
+export function isTopicsExtractResponse(
+  value: unknown,
+): value is TopicsExtractResponse {
+  if (typeof value !== "object" || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+  const strings = (input: unknown): input is string[] =>
+    Array.isArray(input) &&
+    input.every((entry): entry is string => typeof entry === "string");
+
+  return (
+    typeof record.documentId === "string" &&
+    typeof record.documentName === "string" &&
+    strings(record.spansDone) &&
+    strings(record.skippedSpans) &&
+    Array.isArray(record.topics) &&
+    record.topics.every(isExtractedTopicDto) &&
+    typeof record.droppedInvalid === "number" &&
+    typeof record.droppedUngrounded === "number" &&
+    typeof record.repaired === "boolean" &&
+    typeof record.insufficient === "boolean" &&
+    typeof record.done === "boolean"
+  );
 }
 
 /** Truncates excerpts at a word boundary (never mid-word). */

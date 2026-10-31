@@ -145,36 +145,50 @@ export function validateSynthesisRefs(
 }
 
 /**
- * Store-validated progress: units of completed spans over usable
- * units of the whole plan. Spans partition units disjointly, so a
- * plain sum is exact; textless units never enter the plan.
+ * Base span (unsplit plan) whose units fully contain the target
+ * span. Splits key off base spans so repeated truncation drills
+ * deeper deterministically; unknown keys yield null.
  */
-export function spanUnitCounts(
-  spans: { key: string; units: ParsedCoverageUnit[] }[],
-  doneKeys: string[],
-): { processedUnits: number; usableUnits: number; percent: number } {
-  const done = new Set(doneKeys);
-  let usableUnits = 0;
-  let processedUnits = 0;
+export function containingBaseSpan(
+  base: readonly { key: string; units: readonly ParsedCoverageUnit[] }[],
+  target: { units: readonly ParsedCoverageUnit[] },
+): string | null {
+  for (const span of base) {
+    const contains = target.units.every((wanted) =>
+      span.units.some(
+        (unit) =>
+          unit.kind === wanted.kind &&
+          unit.from <= wanted.from &&
+          wanted.to <= unit.to,
+      ),
+    );
 
-  for (const span of spans) {
-    let count = 0;
-
-    for (const unit of span.units) {
-      count += unit.kind === "lines" ? 1 : unit.to - unit.from + 1;
-    }
-
-    usableUnits += count;
-
-    if (done.has(span.key)) processedUnits += count;
+    if (contains) return span.key;
   }
 
-  return {
-    processedUnits,
-    usableUnits,
-    percent:
-      usableUnits === 0 ? 0 : Math.round((processedUnits / usableUnits) * 100),
-  };
+  return null;
+}
+
+/**
+ * Drops persisted spans whose labels no longer overlap the
+ * current plan (reprocessed documents). Matching itself is
+ * unit-based, so stale spans could never skip live content;
+ * pruning only keeps display and storage honest.
+ */
+export function pruneStaleSpans<T extends { label: string }>(
+  planUnits: ParsedCoverageUnit[],
+  spans: T[],
+): T[] {
+  return spans.filter((span) => {
+    const parsed = parseRefLabels([span.label]);
+
+    return (
+      parsed.length > 0 &&
+      parsed.some((part) =>
+        planUnits.some((unit) => spansOverlap(unit, part)),
+      )
+    );
+  });
 }
 
 // ------------------------------------------------------------ orchestrator
@@ -198,6 +212,7 @@ export type SummarySweepOptions = {
     percent: number;
     processedUnits: number;
     usableUnits: number;
+    attempts: number;
   }) => void;
 };
 
@@ -306,6 +321,7 @@ export async function runSummarySweep(
       percent: response.percent,
       processedUnits: response.processedUnits,
       usableUnits: response.usableUnits,
+      attempts: response.attempts,
     });
 
     if (response.done === true || response.percent >= 100) break;

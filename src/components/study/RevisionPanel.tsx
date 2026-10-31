@@ -13,6 +13,7 @@ import type { Entry } from "@/src/lib/study";
 import type { QuizQuestion } from "@/src/lib/quiz";
 import {
   getQuizReviewInfo,
+  type QuizRating,
   type QuizReviewPatch,
 } from "@/src/lib/quizReview";
 import { QuestionReviewer } from "@/src/components/study/QuestionReviewer";
@@ -64,6 +65,7 @@ export function RevisionPanel({
   onReviewQuestion?: (
     id: string,
     patch: QuizReviewPatch,
+    info: { correct: boolean; rating: QuizRating },
   ) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const today = useToday();
@@ -161,7 +163,7 @@ export function RevisionPanel({
           <div className="mt-3">
             <QuestionReviewer
               question={question}
-              onRate={(patch) => persistReview(question.id, patch)}
+              onRate={(patch, info) => persistReview(question.id, patch, info)}
               onClose={() => setExpandedQuestionId(null)}
             />
           </div>

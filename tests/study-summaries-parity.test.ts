@@ -44,6 +44,7 @@ beforeEach(() => {
             usableUnits: 4,
             percent: 50,
             done: false,
+            attempts: 1,
           },
         }),
         { status: 200 },

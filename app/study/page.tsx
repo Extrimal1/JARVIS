@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowLeft,
   BookOpen,
@@ -17,11 +17,24 @@ import Sidebar from "@/src/components/Sidebar";
 import { createId } from "@/src/lib/ids";
 import { useToday } from "@/src/hooks/useToday";
 import { DocumentLibrary } from "@/src/components/study/DocumentLibrary";
+import { ExamManager } from "@/src/components/study/ExamManager";
+import { ExamOverview, type PrepView } from "@/src/components/study/ExamOverview";
+import { ProgressView } from "@/src/components/study/ProgressView";
 import { QuizPanel } from "@/src/components/study/QuizPanel";
 import { RevisionPanel } from "@/src/components/study/RevisionPanel";
+import { StudyPlanner } from "@/src/components/study/StudyPlanner";
+import { SubjectManager } from "@/src/components/study/SubjectManager";
+import { TopicTree } from "@/src/components/study/TopicTree";
 import { daysBetween, formatDaysLeft } from "@/src/lib/briefing";
 import { markReviewed } from "@/src/lib/revision";
 import { useQuiz, useStudy } from "@/src/lib/db/useModules";
+import {
+  listReviewEvents,
+  logReviewEvent,
+} from "@/src/lib/db/reviewEvents";
+import { computeTopicMastery } from "@/src/lib/study/mastery";
+import type { ReviewEvent } from "@/src/lib/study/reviewEvents";
+import type { QuizRating } from "@/src/lib/quizReview";
 import type { ListResource } from "@/src/lib/db/useRemoteResource";
 import type { QuizQuestion } from "@/src/lib/quiz";
 import type { QuizReviewPatch } from "@/src/lib/quizReview";
@@ -51,18 +64,6 @@ const initialData: StudyData = {
 };
 
 const sections = [
-  {
-    key: "subjects",
-    title: "Meine Fächer",
-    description: "Organisiere deine Studienmodule.",
-    icon: GraduationCap,
-  },
-  {
-    key: "exams",
-    title: "Prüfungen",
-    description: "Behalte Prüfungstermine im Blick.",
-    icon: CalendarDays,
-  },
   {
     key: "topics",
     title: "Lernthemen",
@@ -354,10 +355,46 @@ function StudySection({
   );
 }
 
+type StudyTab = "overview" | "documents" | "prep";
+
+const STUDY_TABS: { key: StudyTab; label: string }[] = [
+  { key: "overview", label: "Übersicht" },
+  { key: "documents", label: "Dokumente" },
+  { key: "prep", label: "Prüfungsvorbereitung" },
+];
+
+const PREP_TABS: { key: PrepView; label: string }[] = [
+  { key: "overview", label: "Übersicht" },
+  { key: "exams", label: "Meine Prüfungen" },
+  { key: "topics", label: "Themen" },
+  { key: "plan", label: "Lernplan" },
+  { key: "progress", label: "Fortschritt" },
+];
+
 export default function StudyPage() {
   const studyStore = useStudy(initialData);
   const quizStore = useQuiz();
   const data = studyStore.data;
+  const [tab, setTab] = useState<StudyTab>("overview");
+  const [prepTab, setPrepTab] = useState<PrepView>("overview");
+  const [planFocus, setPlanFocus] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Deep links from subject/topic rows open the documents tab.
+    if (
+      typeof window !== "undefined" &&
+      window.location.hash.startsWith("#dokumente-")
+    ) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setTab("documents");
+    }
+  }, []);
+
+  function openPrep(view: PrepView, examId?: string) {
+    if (examId !== undefined) setPlanFocus(examId);
+
+    setPrepTab(view);
+  }
 
   async function addEntry(key: SectionKey, entry: Entry) {
     await studyStore.addEntry(key, entry);
@@ -387,8 +424,77 @@ export default function StudyPage() {
     });
   }
 
-  async function reviewQuestion(id: string, patch: QuizReviewPatch) {
-    return quizStore.update(id, patch);
+  const [reviewEvents, setReviewEvents] = useState<ReviewEvent[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    listReviewEvents()
+      .then((events) => {
+        if (!cancelled) setReviewEvents(events);
+      })
+      .catch(() => {
+        if (!cancelled) setReviewEvents([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function reviewQuestion(
+    id: string,
+    patch: QuizReviewPatch,
+    info: { correct: boolean; rating: QuizRating },
+  ) {
+    const result = await quizStore.update(id, patch);
+
+    if (!result.ok) return result;
+
+    // History + mastery refresh are best-effort: the quiz update
+    // already succeeded, so failures here must not fail the review.
+    try {
+      const current = quizStore.items.find((item) => item.id === id);
+      const updated =
+        result.data !== undefined && result.data !== null
+          ? (result.data as QuizQuestion)
+          : current;
+
+      if (updated === undefined) return result;
+
+      const event = await logReviewEvent({
+        questionId: id,
+        topicId: updated.topicId ?? null,
+        examId: updated.examId ?? null,
+        kind: updated.kind ?? "single",
+        correct: info.correct,
+        rating: info.rating,
+      });
+      const events = [event, ...reviewEvents];
+
+      setReviewEvents(events);
+
+      if (updated.topicId !== null) {
+        const questions = quizStore.items.map((item) =>
+          item.id === id ? { ...item, ...patch } : item,
+        );
+        const { mastery, evidence } = computeTopicMastery(
+          updated.topicId,
+          questions,
+          events,
+          new Date().toISOString(),
+        );
+
+        await studyStore.updateEntry(updated.topicId, {
+          mastery,
+          masteryEvidence: evidence,
+        });
+      }
+    } catch (historyError) {
+      console.warn("Review-Verlauf konnte nicht gespeichert werden.", historyError);
+    }
+
+    return result;
   }
 
   const today = useToday();
@@ -469,10 +575,32 @@ export default function StudyPage() {
             </div>
           )}
 
-          <div
-            className="jarvis-enter mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4"
-            style={{ "--enter-delay": "60ms" } as React.CSSProperties}
+          <nav
+            aria-label="Studium-Bereiche"
+            className="mt-8 flex flex-wrap gap-2"
           >
+            {STUDY_TABS.map((entry) => (
+              <button
+                key={entry.key}
+                onClick={() => setTab(entry.key)}
+                aria-pressed={tab === entry.key}
+                className={`rounded-xl border px-4 py-2.5 text-sm transition ${
+                  tab === entry.key
+                    ? "border-cyan-300/50 bg-cyan-300/[0.08] font-medium text-cyan-100"
+                    : "border-white/10 text-slate-400 hover:border-white/25 hover:text-slate-200"
+                }`}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </nav>
+
+          {tab === "overview" && (
+            <>
+              <div
+                className="jarvis-enter mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4"
+                style={{ "--enter-delay": "60ms" } as React.CSSProperties}
+              >
             <div className="rounded-2xl border border-white/[0.08] bg-[#0d111b] p-5">
               <GraduationCap className="text-cyan-300" size={22} />
               <p className="mt-4 text-2xl font-semibold tabular-nums">
@@ -529,44 +657,153 @@ export default function StudyPage() {
             </div>
           </div>
 
-          <div
-            className="jarvis-enter mt-8 grid gap-5 xl:grid-cols-2"
-            style={{ "--enter-delay": "120ms" } as React.CSSProperties}
-          >
-            {sections.map((section) => (
-              <StudySection
-                key={section.key}
-                sectionKey={section.key}
-                title={section.title}
-                description={section.description}
-                icon={section.icon}
-                items={data[section.key]}
-                subjects={data.subjects}
-                onAdd={addEntry}
-                onDelete={deleteEntry}
-                onToggle={toggleTopic}
-                quizStore={quizStore}
-              />
-            ))}
-          </div>
+              <div
+                className="jarvis-enter mt-8 grid gap-5 xl:grid-cols-2"
+                style={{ "--enter-delay": "120ms" } as React.CSSProperties}
+              >
+                <SubjectManager
+                  data={data}
+                  studyStore={studyStore}
+                  quizStore={quizStore}
+                />
+                {sections
+                  .filter((section) => section.key === "topics")
+                  .map((section) => (
+                    <StudySection
+                      key={section.key}
+                      sectionKey={section.key}
+                      title={section.title}
+                      description={section.description}
+                      icon={section.icon}
+                      items={data[section.key]}
+                      subjects={data.subjects}
+                      onAdd={addEntry}
+                      onDelete={deleteEntry}
+                      onToggle={toggleTopic}
+                      quizStore={quizStore}
+                    />
+                  ))}
+              </div>
+            </>
+          )}
 
-          <div
-            className="jarvis-enter mt-8 space-y-5"
-            style={{ "--enter-delay": "180ms" } as React.CSSProperties}
-          >
-            <RevisionPanel
-              topics={data.topics}
-              onReview={reviewTopic}
-              questions={quizStore.items}
-              onReviewQuestion={reviewQuestion}
-            />
-            <QuizPanel
-              subjects={data.subjects}
-              exams={data.exams}
-              topics={data.topics}
-              store={quizStore}
-            />
-          </div>
+          {tab === "documents" && (
+            <div
+              className="jarvis-enter mt-8 space-y-5"
+              style={{ "--enter-delay": "60ms" } as React.CSSProperties}
+            >
+              {sections
+                .filter((section) => section.key === "materials")
+                .map((section) => (
+                  <StudySection
+                    key={section.key}
+                    sectionKey={section.key}
+                    title={section.title}
+                    description={section.description}
+                    icon={section.icon}
+                    items={data[section.key]}
+                    subjects={data.subjects}
+                    onAdd={addEntry}
+                    onDelete={deleteEntry}
+                    onToggle={toggleTopic}
+                    quizStore={quizStore}
+                  />
+                ))}
+              <RevisionPanel
+                topics={data.topics}
+                onReview={reviewTopic}
+                questions={quizStore.items}
+                onReviewQuestion={reviewQuestion}
+              />
+              <QuizPanel
+                subjects={data.subjects}
+                exams={data.exams}
+                topics={data.topics}
+                store={quizStore}
+              />
+            </div>
+          )}
+
+          {tab === "prep" && (
+            <div
+              className="jarvis-enter mt-8 space-y-5"
+              style={{ "--enter-delay": "60ms" } as React.CSSProperties}
+            >
+              <nav
+                aria-label="Prüfungsvorbereitung"
+                className="flex flex-wrap gap-2"
+              >
+                {PREP_TABS.map((entry) => (
+                  <button
+                    key={entry.key}
+                    onClick={() => setPrepTab(entry.key)}
+                    aria-pressed={prepTab === entry.key}
+                    className={`rounded-xl border px-4 py-2 text-sm transition ${
+                      prepTab === entry.key
+                        ? "border-cyan-300/50 bg-cyan-300/[0.08] font-medium text-cyan-100"
+                        : "border-white/10 text-slate-400 hover:border-white/25 hover:text-slate-200"
+                    }`}
+                  >
+                    {entry.label}
+                  </button>
+                ))}
+              </nav>
+
+              {prepTab === "overview" && (
+                <ExamOverview
+                  data={data}
+                  questions={quizStore.items}
+                  events={reviewEvents}
+                  today={today}
+                  onOpen={openPrep}
+                />
+              )}
+
+              {prepTab === "exams" && (
+                <ExamManager
+                  data={data}
+                  studyStore={studyStore}
+                  quizStore={quizStore}
+                />
+              )}
+
+              {prepTab === "topics" && (
+                <section className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-5 sm:p-6">
+                  <h2 className="font-semibold">Themen</h2>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">
+                    Automatisch erkannte Themen mit Quellen, Lernstand und
+                    Priorität.
+                  </p>
+                  <div className="mt-4">
+                    <TopicTree
+                      data={data}
+                      studyStore={studyStore}
+                      quizStore={quizStore}
+                    />
+                  </div>
+                </section>
+              )}
+
+              {prepTab === "plan" && (
+                <StudyPlanner
+                  key={planFocus ?? "all"}
+                  data={data}
+                  studyStore={studyStore}
+                  quizStore={quizStore}
+                  focusExamId={planFocus}
+                />
+              )}
+
+              {prepTab === "progress" && (
+                <ProgressView
+                  data={data}
+                  questions={quizStore.items}
+                  events={reviewEvents}
+                  studyStore={studyStore}
+                />
+              )}
+            </div>
+          )}
 
           <footer className="py-8 text-center text-xs text-slate-600">
             J.A.R.V.I.S. · University Hub ·{" "}

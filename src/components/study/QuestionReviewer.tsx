@@ -36,7 +36,10 @@ export function QuestionReviewer({
   onClose,
 }: {
   question: QuizQuestion;
-  onRate: (patch: QuizReviewPatch) => Promise<{ ok: boolean; error?: string }>;
+  onRate: (
+    patch: QuizReviewPatch,
+    info: { correct: boolean; rating: QuizRating },
+  ) => Promise<{ ok: boolean; error?: string }>;
   onClose: () => void;
 }) {
   const today = useToday();
@@ -88,7 +91,7 @@ export function QuestionReviewer({
     setRatingBusy(true);
     setRateError(null);
 
-    const result = await onRate(patch);
+    const result = await onRate(patch, { correct: isCorrect, rating });
 
     setRatingBusy(false);
 

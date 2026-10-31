@@ -521,22 +521,37 @@ function bitReverse(value: number, bits: number): number {
 
 /**
  * Full-coverage sweep plan: contiguous groups accumulate into
- * spans (logical reading order inside each span), then spans run
- * in bit-reversal order so the first batches already spread over
- * the whole document. Unlike the question window (a sample), the
- * sweep covers every usable unit exactly once. Deterministic.
+ * spans (logical reading order inside each span), spans listed in
+ * `splits` subdivide recursively (truncation recovery), then
+ * spans run in bit-reversal order so the first batches already
+ * spread over the whole document. Unlike the question window (a
+ * sample), the sweep covers every usable unit exactly once.
+ * Deterministic: same chunks + splits always yield same spans.
  */
 export function planSummarySweep(
-  groups: ChunkGroup[],
+  chunks: CoverableChunk[],
   budgetChars: number = SUMMARY_SPAN_BUDGET_CHARS,
+  splits: Record<string, number> = {},
 ): SummarySpan[] {
   const budget =
     Number.isInteger(budgetChars) && budgetChars > 0
       ? budgetChars
       : SUMMARY_SPAN_BUDGET_CHARS;
-  const ordered: SummarySpan[] = [];
+  const groups = groupChunksByUnit(chunks);
+  const byIndex = new Map(chunks.map((chunk) => [chunk.index, chunk]));
+  const base: SummarySpan[] = [];
   let current: SummarySpan | null = null;
   let used = 0;
+
+  const flush = (): void => {
+    if (current === null || current.chunkIndices.length === 0) return;
+
+    current.key = spanKey(current.units);
+    current.label = unitsLabel(current.units);
+    base.push(current);
+    current = null;
+    used = 0;
+  };
 
   for (const group of groups) {
     if (
@@ -544,11 +559,7 @@ export function planSummarySweep(
       used + group.chars > budget &&
       current.chunkIndices.length > 0
     ) {
-      current.key = spanKey(current.units);
-      current.label = unitsLabel(current.units);
-      ordered.push(current);
-      current = null;
-      used = 0;
+      flush();
     }
 
     if (current === null) {
@@ -562,10 +573,17 @@ export function planSummarySweep(
     used += group.chars;
   }
 
-  if (current !== null && current.chunkIndices.length > 0) {
-    current.key = spanKey(current.units);
-    current.label = unitsLabel(current.units);
-    ordered.push(current);
+  flush();
+
+  const ordered: SummarySpan[] = [];
+
+  for (const span of base) {
+    const depth =
+      Number.isInteger(splits[span.key]) && (splits[span.key] ?? 0) > 0
+        ? Math.min(splits[span.key] as number, 10)
+        : 0;
+
+    ordered.push(...subdivideSpan(span, depth, byIndex));
   }
 
   const bits = Math.max(1, Math.ceil(Math.log2(Math.max(ordered.length, 1))));
@@ -575,6 +593,60 @@ export function planSummarySweep(
     .map((span, index) => ({ span, rank: bitReverse(index, bits) }))
     .sort((a, b) => a.rank - b.rank)
     .map((entry) => entry.span);
+}
+
+/**
+ * Recursively halves a span's chunks (contiguous, order kept).
+ * Single-chunk spans are terminal — the honest floor for
+ * truncation recovery. Leaf keys/labels derive from exact leaf
+ * units, so resume matching and progress stay precise.
+ */
+function subdivideSpan(
+  span: SummarySpan,
+  depth: number,
+  byIndex: Map<number, CoverableChunk>,
+): SummarySpan[] {
+  if (depth <= 0 || span.chunkIndices.length <= 1) {
+    return [span];
+  }
+
+  const mid = Math.ceil(span.chunkIndices.length / 2);
+  const halves = [
+    span.chunkIndices.slice(0, mid),
+    span.chunkIndices.slice(mid),
+  ];
+  const leaves: SummarySpan[] = [];
+
+  for (const indices of halves) {
+    if (indices.length === 0) continue;
+
+    const units: ParsedCoverageUnit[] = [];
+    let chars = 0;
+
+    for (const index of indices) {
+      const chunk = byIndex.get(index);
+
+      if (chunk === undefined) continue;
+
+      for (const ref of chunk.refs) pushUnit(units, refToUnit(ref));
+
+      chars += chunk.text.length;
+    }
+
+    if (indices.length === 0 || units.length === 0) continue;
+
+    leaves.push({
+      key: spanKey(units),
+      label: unitsLabel(units),
+      units,
+      chunkIndices: [...indices].sort((a, b) => a - b),
+      chars,
+    });
+  }
+
+  if (leaves.length <= 1) return [span];
+
+  return leaves.flatMap((leaf) => subdivideSpan(leaf, depth - 1, byIndex));
 }
 
 /** Lowercased letter/digit tokens (punctuation stripped). */

@@ -6,7 +6,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  groupChunksByUnit,
   parseRefLabels,
   planSummarySweep,
   type CoverableChunk,
@@ -39,8 +38,12 @@ function chunk(
   return { index, text, refs };
 }
 
-function planOf(slides: number, chars = 400): SummarySpan[] {
-  return planSummarySweep(groupChunksByUnit(slideChunks(slides, chars)));
+function planOf(
+  slides: number,
+  chars = 400,
+  splits: Record<string, number> = {},
+): SummarySpan[] {
+  return planSummarySweep(slideChunks(slides, chars), 4000, splits);
 }
 
 /** Every unit 1..n covered exactly once across all spans. */
@@ -113,7 +116,7 @@ describe("planSummarySweep", () => {
     const chunks = Array.from({ length: 8 }, (_, i) =>
       chunk(i, "x".repeat(100), [{ kind: "slide", slide: i + 1 }]),
     );
-    const spans = planSummarySweep(groupChunksByUnit(chunks), 150);
+    const spans = planSummarySweep(chunks, 150);
 
     assert.deepEqual(
       spans.map((span) => span.label),
@@ -144,8 +147,8 @@ describe("planSummarySweep", () => {
     const pages = Array.from({ length: 4 }, (_, i) =>
       chunk(i, "x".repeat(1200), [{ kind: "page", page: i + 1 }]),
     );
-    const tight = planSummarySweep(groupChunksByUnit(pages), 1500);
-    const wide = planSummarySweep(groupChunksByUnit(pages), 100000);
+    const tight = planSummarySweep(pages, 1500);
+    const wide = planSummarySweep(pages, 100000);
 
     assert.equal(tight.length, 4);
     assert.equal(wide.length, 1);
@@ -154,6 +157,59 @@ describe("planSummarySweep", () => {
 
   it("returns no spans for empty input", () => {
     assert.deepEqual(planSummarySweep([]), []);
+  });
+
+  it("subdivides split spans with exact unit keys", () => {
+    const base = planOf(20);
+    const baseKeys = base.map((span) => span.key);
+    const victim = baseKeys[0]!;
+    const split = planOf(20, 400, { [victim]: 1 });
+
+    assert.equal(split.length, base.length + 1);
+    assert.ok(!split.some((span) => span.key === victim));
+    assertExactCover(split, 20);
+
+    const parent = base.find((span) => span.key === victim)!;
+    const children = split.filter((span) =>
+      parent.chunkIndices.some((index) => span.chunkIndices.includes(index)),
+    );
+
+    assert.equal(children.length, 2);
+
+    const [first, second] = [...children].sort(
+      (a, b) => a.chunkIndices[0]! - b.chunkIndices[0]!,
+    );
+
+    assert.ok(first!.chunkIndices.every((index) => index < (second!.chunkIndices[0] ?? 0)));
+    assert.deepEqual(
+      [...(first?.chunkIndices ?? []), ...(second?.chunkIndices ?? [])].sort(
+        (a, b) => a - b,
+      ),
+      [...parent.chunkIndices].sort((a, b) => a - b),
+    );
+  });
+
+  it("drills recursively and stops at single-chunk spans", () => {
+    const one = planOf(8, 400, { "slide:1-8": 2 });
+
+    assert.equal(one.length, 4);
+    assertExactCover(one, 8);
+
+    const immune = planSummarySweep(slideChunks(2, 100), 100000, {
+      "slide:1-2": 5,
+    });
+
+    assert.deepEqual(
+      immune.map((span) => span.key),
+      ["slide:1", "slide:2"],
+    );
+  });
+
+  it("ignores unknown split keys", () => {
+    assert.deepEqual(
+      planOf(20, 400, { "slide:99": 3 }).map((span) => span.key),
+      planOf(20).map((span) => span.key),
+    );
   });
 });
 
@@ -257,6 +313,23 @@ describe("summary protocol guards", () => {
     );
   });
 
+  it("accepts drafts with and without splits", () => {
+    assert.equal(
+      isDocumentSummary({
+        ...full,
+        draft: { ...full.draft, splits: { "slide:1-10": 2 } },
+      }),
+      true,
+    );
+    assert.equal(
+      isDocumentSummary({
+        ...full,
+        draft: { ...full.draft, splits: { "slide:1-10": "tief" } },
+      }),
+      false,
+    );
+  });
+
   it("rejects malformed summary states", () => {
     assert.equal(isDocumentSummary({ ...full, status: "fertig" }), false);
     assert.equal(
@@ -284,6 +357,7 @@ describe("summary protocol guards", () => {
         usableUnits: 51,
         percent: 8,
         done: false,
+        attempts: 1,
       }),
       true,
     );

@@ -719,6 +719,324 @@ describe("summarizeNextSpan", () => {
     );
   });
 
+  it("retries a truncated span smaller and persists the subspan", async () => {
+    stubDocAndChunks();
+    onRest("GET", "study_summaries", () => json([]));
+    onRest("POST", "study_summaries", () => json([{}]));
+    const patches: Record<string, unknown>[] = [];
+    onRest("PATCH", "study_summaries", (args) => {
+      patches.push(JSON.parse(args.body ?? "{}") as Record<string, unknown>);
+
+      return json([{}]);
+    });
+    let calls = 0;
+    routes.push({
+      match: (args) => args.url === "http://127.0.0.1:11434/api/chat",
+      respond: () => {
+        calls += 1;
+
+        if (calls === 1) {
+          return json({
+            message: { content: "" },
+            done: true,
+            done_reason: "length",
+            eval_count: 2000,
+          });
+        }
+
+        return json({ message: { content: "Teil eins [Q1]." } });
+      },
+    });
+
+    const outcome = await summarizeNextSpan(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: null,
+    });
+
+    assert.equal(outcome.ok, true);
+
+    if (!outcome.ok) return;
+
+    assert.equal(calls, 2);
+    assert.equal(outcome.response.span.key, "slide:1");
+    assert.equal(outcome.response.span.label, "Folie 1");
+    assert.equal(outcome.response.text, "Teil eins (Folie 1).");
+    assert.deepEqual(outcome.response.refs, ["Folie 1"]);
+    assert.equal(outcome.response.attempts, 2);
+    assert.equal(outcome.response.percent, 25);
+    assert.equal(patches.length, 2);
+    assert.deepEqual(patches[0]?.draft_splits, { "slide:1-2": 1 });
+    assert.deepEqual(patches[0]?.draft_spans, []);
+    assert.equal((patches[1]?.draft_spans as unknown[]).length, 1);
+
+    const bodies = hits
+      .filter((hit) => hit.url.includes("11434"))
+      .map((hit) => hit.body ?? "");
+
+    assert.ok(bodies[0]?.includes("FOLIE-1-TEXT"));
+    assert.ok(bodies[0]?.includes("FOLIE-2-TEXT"));
+    assert.ok(bodies[1]?.includes("FOLIE-1-TEXT"));
+    assert.ok(!bodies[1]?.includes("FOLIE-2-TEXT"));
+  });
+
+  it("drills recursively on repeated truncation", async () => {
+    const bigChunks = [1, 2, 3, 4, 5, 6, 7, 8].map((slide) => ({
+      id: `s${slide}`,
+      document_id: "doc-1",
+      chunk_index: slide - 1,
+      content: `FOLIE-${slide}-TEXT ${"x".repeat(1000)}`,
+      source_refs: [{ kind: "slide", slide }],
+    }));
+    onRest("GET", "study_documents", () => json([DOC_ROW]));
+    onRest("GET", "retrieval_chunks", () => json(bigChunks));
+    onRest("GET", "study_summaries", () => json([]));
+    onRest("POST", "study_summaries", () => json([{}]));
+    const patches: Record<string, unknown>[] = [];
+    onRest("PATCH", "study_summaries", (args) => {
+      patches.push(JSON.parse(args.body ?? "{}") as Record<string, unknown>);
+
+      return json([{}]);
+    });
+    let calls = 0;
+    routes.push({
+      match: (args) => args.url === "http://127.0.0.1:11434/api/chat",
+      respond: () => {
+        calls += 1;
+
+        if (calls <= 2) {
+          return json({
+            message: { content: "" },
+            done: true,
+            done_reason: "length",
+            eval_count: 2000,
+          });
+        }
+
+        return json({ message: { content: "Winzig [Q1]." } });
+      },
+    });
+
+    const outcome = await summarizeNextSpan(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: null,
+    });
+
+    assert.equal(outcome.ok, true);
+
+    if (!outcome.ok) return;
+
+    assert.equal(calls, 3);
+    assert.equal(outcome.response.span.key, "slide:1");
+    assert.equal(outcome.response.attempts, 3);
+    assert.deepEqual(patches[patches.length - 1]?.draft_splits, {
+      "slide:1-3": 2,
+    });
+  });
+
+  it("never regenerates persisted subspans on resume", async () => {
+    const bigChunks = [1, 2, 3, 4, 5, 6, 7, 8].map((slide) => ({
+      id: `s${slide}`,
+      document_id: "doc-1",
+      chunk_index: slide - 1,
+      content: `FOLIE-${slide}-TEXT ${"x".repeat(1000)}`,
+      source_refs: [{ kind: "slide", slide }],
+    }));
+    onRest("GET", "study_documents", () => json([DOC_ROW]));
+    onRest("GET", "retrieval_chunks", () => json(bigChunks));
+    onRest("GET", "study_summaries", () =>
+      json([
+        summaryRow({
+          draft_splits: { "slide:1-4": 2 },
+          draft_spans: [
+            {
+              key: "slide:1",
+              label: "Folie 1",
+              text: "Bereits da (Folie 1).",
+              refs: ["Folie 1"],
+              completedAt: "2026-10-31T10:00:00.000Z",
+            },
+          ],
+        }),
+      ]),
+    );
+    onRest("PATCH", "study_summaries", () => json([{}]));
+    ollamaWith(["Weiter [Q1] und [Q2]."]);
+
+    const outcome = await summarizeNextSpan(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: GEN,
+    });
+
+    assert.equal(outcome.ok, true);
+
+    if (!outcome.ok) return;
+
+    assert.equal(outcome.response.span.key, "slide:7-8");
+    assert.equal(outcome.response.attempts, 1);
+    assert.equal(outcome.response.percent, 38);
+
+    const body =
+      hits.find((hit) => hit.url.includes("11434"))?.body ?? "";
+
+    assert.ok(body.includes("FOLIE-7-TEXT"));
+    assert.ok(body.includes("FOLIE-8-TEXT"));
+    assert.ok(!body.includes("FOLIE-1-TEXT"));
+    assert.ok(!body.includes("FOLIE-2-TEXT"));
+  });
+
+  it("keeps minimum-size truncation resumable", async () => {
+    onRest("GET", "study_documents", () => json([DOC_ROW]));
+    onRest("GET", "retrieval_chunks", () =>
+      json([
+        {
+          id: "s1",
+          document_id: "doc-1",
+          chunk_index: 0,
+          content: `FOLIE-1-TEXT ${"x".repeat(1500)}`,
+          source_refs: [{ kind: "slide", slide: 1 }],
+        },
+      ]),
+    );
+    onRest("GET", "study_summaries", () => json([]));
+    let inserted: Record<string, unknown> = {};
+    onRest("POST", "study_summaries", (args) => {
+      const rows = JSON.parse(args.body ?? "[]") as Record<string, unknown>[];
+      inserted = rows[0] ?? {};
+
+      return json([inserted]);
+    });
+    let patched = 0;
+    onRest("PATCH", "study_summaries", () => {
+      patched += 1;
+
+      return json([{}]);
+    });
+    routes.push({
+      match: (args) => args.url === "http://127.0.0.1:11434/api/chat",
+      respond: () =>
+        json({
+          message: { content: "" },
+          done: true,
+          done_reason: "length",
+          eval_count: 2000,
+        }),
+    });
+
+    const first = await summarizeNextSpan(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: null,
+    });
+
+    assert.deepEqual(first, {
+      ok: false,
+      http: 409,
+      message:
+        "Selbst der kleinste Abschnitt wurde abgeschnitten — der Entwurf bleibt gespeichert, bitte später erneut versuchen.",
+    });
+    assert.equal(patched, 0);
+
+    const gid = inserted.draft_generation_id as string;
+
+    assert.ok(typeof gid === "string" && gid !== "");
+
+    routes.length = 0;
+    onRest("GET", "study_documents", () => json([DOC_ROW]));
+    onRest("GET", "retrieval_chunks", () =>
+      json([
+        {
+          id: "s1",
+          document_id: "doc-1",
+          chunk_index: 0,
+          content: "FOLIE-1-TEXT",
+          source_refs: [{ kind: "slide", slide: 1 }],
+        },
+      ]),
+    );
+    onRest("GET", "study_summaries", () =>
+      json([summaryRow({ draft_generation_id: gid, draft_spans: [] })]),
+    );
+    onRest("POST", "study_summaries", () => json([{}]));
+    onRest("PATCH", "study_summaries", () => json([{}]));
+    routes.push({
+      match: (args) => args.url === "http://127.0.0.1:11434/api/chat",
+      respond: () =>
+        json({
+          message: { content: "" },
+          done: true,
+          done_reason: "length",
+          eval_count: 2000,
+        }),
+    });
+
+    const retry = await summarizeNextSpan(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: gid,
+    });
+
+    assert.deepEqual(retry, first);
+  });
+
+  it("bounds retries on persistently truncating spans", async () => {
+    const many = Array.from({ length: 512 }, (_, i) => ({
+      id: `s${i + 1}`,
+      document_id: "doc-1",
+      chunk_index: i,
+      content: `ZEILE-${i + 1} ${"x".repeat(8)}`,
+      source_refs: [{ kind: "lines", start: i + 1, end: i + 1 }],
+    }));
+    onRest("GET", "study_documents", () => json([DOC_ROW]));
+    onRest("GET", "retrieval_chunks", () => json(many));
+    onRest("GET", "study_summaries", () => json([]));
+    onRest("POST", "study_summaries", () => json([{}]));
+    const patches: Record<string, unknown>[] = [];
+    onRest("PATCH", "study_summaries", (args) => {
+      patches.push(JSON.parse(args.body ?? "{}") as Record<string, unknown>);
+
+      return json([{}]);
+    });
+    let calls = 0;
+    routes.push({
+      match: (args) => args.url === "http://127.0.0.1:11434/api/chat",
+      respond: () => {
+        calls += 1;
+
+        return json({
+          message: { content: "" },
+          done: true,
+          done_reason: "length",
+          eval_count: 2000,
+        });
+      },
+    });
+
+    const outcome = await summarizeNextSpan(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: null,
+    });
+
+    assert.deepEqual(outcome, {
+      ok: false,
+      http: 409,
+      message:
+        "Der Abschnitt wurde wiederholt abgeschnitten — der Entwurf bleibt gespeichert, bitte erneut versuchen.",
+    });
+    assert.equal(calls, 8);
+    assert.deepEqual(patches[patches.length - 1]?.draft_spans, []);
+    assert.equal(
+      Object.values(
+        (patches[patches.length - 1]?.draft_splits as Record<string, number>) ??
+          {},
+      )[0],
+      8,
+    );
+  });
+
   it("rejects stale generations without calling the model", async () => {
     stubDocAndChunks();
     onRest("GET", "study_summaries", () => json([summaryRow()]));
@@ -797,37 +1115,47 @@ describe("summarizeNextSpan", () => {
     assert.ok(hits.every((hit) => !hit.url.includes("11434")));
   });
 
-  it("maps batch truncation without persisting a span", async () => {
+  it("recovers from truncation, then reports minimum size", async () => {
     stubDocAndChunks();
     onRest("GET", "study_summaries", () => json([]));
     onRest("POST", "study_summaries", () => json([{}]));
-    let patched = 0;
-    onRest("PATCH", "study_summaries", () => {
-      patched += 1;
+    const patches: Record<string, unknown>[] = [];
+    onRest("PATCH", "study_summaries", (args) => {
+      patches.push(JSON.parse(args.body ?? "{}") as Record<string, unknown>);
 
       return json([{}]);
     });
+    let calls = 0;
     routes.push({
       match: (args) => args.url === "http://127.0.0.1:11434/api/chat",
-      respond: () =>
-        json({
+      respond: () => {
+        calls += 1;
+
+        return json({
           message: { content: "" },
           done: true,
           done_reason: "length",
-          eval_count: 1200,
-        }),
+          eval_count: 2000,
+        });
+      },
     });
 
-    await assert.rejects(
-      summarizeNextSpan(DB, {
-        documentId: "doc-1",
-        locale: "de",
-        generationId: null,
-      }),
-      (error: unknown) =>
-        error instanceof ProviderError && error.code === "truncated",
-    );
-    assert.equal(patched, 0);
+    const outcome = await summarizeNextSpan(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: null,
+    });
+
+    assert.equal(calls, 2);
+    assert.deepEqual(outcome, {
+      ok: false,
+      http: 409,
+      message:
+        "Selbst der kleinste Abschnitt wurde abgeschnitten — der Entwurf bleibt gespeichert, bitte später erneut versuchen.",
+    });
+    assert.equal(patches.length, 1);
+    assert.deepEqual(patches[0]?.draft_splits, { "slide:1-2": 1 });
+    assert.deepEqual(patches[0]?.draft_spans, []);
   });
 
   it("returns 404/409 for missing or unprocessed documents", async () => {
@@ -979,6 +1307,41 @@ describe("synthesizeSummary", () => {
     assert.ok(!("draft_generation_id" in (patches[0] ?? {})));
   });
 
+  it("never marks split drafts complete early", async () => {
+    const bigChunks = [1, 2, 3, 4].map((slide) => ({
+      id: `s${slide}`,
+      document_id: "doc-1",
+      chunk_index: slide - 1,
+      content: `FOLIE-${slide}-TEXT ${"x".repeat(1500)}`,
+      source_refs: [{ kind: "slide", slide }],
+    }));
+    onRest("GET", "study_documents", () => json([DOC_ROW]));
+    onRest("GET", "retrieval_chunks", () => json(bigChunks));
+    onRest("GET", "study_summaries", () =>
+      json([
+        {
+          ...summaryRow([span("slide:1", "Folie 1")]),
+          draft_splits: { "slide:1-2": 1 },
+        },
+      ]),
+    );
+    onRest("PATCH", "study_summaries", () => json([{}]));
+    ollamaWith(["Teil (Folie 1)."]);
+
+    const outcome = await synthesizeSummary(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: GEN,
+    });
+
+    assert.equal(outcome.ok, true);
+
+    if (!outcome.ok) return;
+
+    assert.equal(outcome.response.complete, false);
+    assert.deepEqual(outcome.response.refs, ["Folie 1"]);
+  });
+
   it("rejects fabricated refs without writing", async () => {
     stubDocAndChunks();
     onRest("GET", "study_summaries", () =>
@@ -1064,13 +1427,17 @@ describe("synthesizeSummary", () => {
             label: `Span ${order}`,
             order,
           })),
-          draft_spans: keys.map((key) => ({
-            key,
-            label: `Span ${key}`,
-            text: "y".repeat(2100),
-            refs: [],
-            completedAt: "2026-10-31T10:00:00.000Z",
-          })),
+          draft_spans: keys.map((key, order) => {
+            const label = `Folien ${order * 2 + 1}–${order * 2 + 2}`;
+
+            return {
+              key,
+              label,
+              text: "y".repeat(2100),
+              refs: [label],
+              completedAt: "2026-10-31T10:00:00.000Z",
+            };
+          }),
           draft_preview_md: "",
           draft_preview_refs: [],
           draft_started_at: "2026-10-31T09:00:00.000Z",

@@ -1,5 +1,14 @@
 import { parseISODateLocal } from "@/src/lib/calendar";
-import { isEntry, type Entry } from "@/src/lib/study";
+import {
+  isEntry,
+  isExamData,
+  isMasteryEvidence,
+  isTopicData,
+  isTopicMastery,
+  isTopicSourceRefList,
+  type Entry,
+} from "@/src/lib/study";
+import { dbGetOne, type DbClient } from "@/src/lib/supabase/db";
 import {
   pickPatch,
   requireId,
@@ -77,6 +86,40 @@ function isValidEntry(value: unknown): value is Entry {
     return false;
   }
 
+  if (
+    item.parentId !== undefined &&
+    item.parentId !== null &&
+    typeof item.parentId !== "string"
+  ) {
+    return false;
+  }
+
+  if (
+    item.sourceRefs !== undefined &&
+    !isTopicSourceRefList(item.sourceRefs)
+  ) {
+    return false;
+  }
+
+  if (item.mastery !== undefined && !isTopicMastery(item.mastery)) {
+    return false;
+  }
+
+  if (
+    item.masteryEvidence !== undefined &&
+    !isMasteryEvidence(item.masteryEvidence)
+  ) {
+    return false;
+  }
+
+  if (item.topicData !== undefined && !isTopicData(item.topicData)) {
+    return false;
+  }
+
+  if (item.examData !== undefined && !isExamData(item.examData)) {
+    return false;
+  }
+
   return true;
 }
 
@@ -96,6 +139,24 @@ function toDomain(row: Record<string, unknown>): unknown {
   }
   if (typeof row.last_reviewed_at === "string") {
     entry.lastReviewedAt = row.last_reviewed_at;
+  }
+  if (typeof row.parent_id === "string") {
+    entry.parentId = row.parent_id;
+  }
+  if (isTopicSourceRefList(row.source_refs) && row.source_refs.length > 0) {
+    entry.sourceRefs = row.source_refs;
+  }
+  if (isTopicMastery(row.mastery) && row.mastery !== "not-started") {
+    entry.mastery = row.mastery;
+  }
+  if (isMasteryEvidence(row.mastery_evidence)) {
+    entry.masteryEvidence = row.mastery_evidence;
+  }
+  if (isTopicData(row.topic_data)) {
+    entry.topicData = row.topic_data;
+  }
+  if (isExamData(row.exam_data)) {
+    entry.examData = row.exam_data;
   }
 
   return entry;
@@ -125,7 +186,70 @@ function toDbRow(section: StudySection, entry: Entry): Record<string, unknown> {
     done: entry.done ?? null,
     review_stage: entry.reviewStage ?? null,
     last_reviewed_at: entry.lastReviewedAt ?? null,
+    parent_id: entry.parentId ?? null,
+    source_refs: entry.sourceRefs ?? [],
+    mastery: entry.mastery ?? "not-started",
+    mastery_evidence: entry.masteryEvidence ?? {},
+    topic_data: entry.topicData ?? {},
+    exam_data: entry.examData ?? {},
   };
+}
+
+/**
+ * Every linked record must exist and be owned by the caller
+ * (the RLS-scoped client returns null for foreign rows, so a
+ * missing row and a foreign row fail identically). Exam links
+ * and topic parents are validated; anything else links by
+ * free-text title and needs no lookup.
+ */
+async function checkLinks(
+  db: DbClient,
+  section: StudySection,
+  entry: Entry,
+): Promise<string | null> {
+  if (section === "exams" && entry.examData !== undefined) {
+    for (const documentId of entry.examData.documentIds) {
+      const doc = await dbGetOne<Record<string, unknown>>(
+        db,
+        "study_documents",
+        documentId,
+      );
+
+      if (doc === null) {
+        return "Unbekannte Dokumentverknüpfung.";
+      }
+    }
+
+    for (const topicId of entry.examData.topicIds) {
+      const topic = await dbGetOne<Record<string, unknown>>(
+        db,
+        "study_entries",
+        topicId,
+      );
+
+      if (topic === null || topic.section !== "topics") {
+        return "Unbekannte Themenverknüpfung.";
+      }
+    }
+  }
+
+  if (
+    section === "topics" &&
+    entry.parentId !== undefined &&
+    entry.parentId !== null
+  ) {
+    const parent = await dbGetOne<Record<string, unknown>>(
+      db,
+      "study_entries",
+      entry.parentId,
+    );
+
+    if (parent === null || parent.section !== "topics") {
+      return "Unbekanntes übergeordnetes Thema.";
+    }
+  }
+
+  return null;
 }
 
 export const studyConfig: CrudConfig = {
@@ -133,7 +257,7 @@ export const studyConfig: CrudConfig = {
   order: "created_at.asc",
   toDomain,
   isList: isRowList,
-  checkCreate: (_db, body) => {
+  checkCreate: async (db, body) => {
     if (typeof body !== "object" || body === null) {
       return { message: "Ungültiger Eintrag." };
     }
@@ -148,9 +272,15 @@ export const studyConfig: CrudConfig = {
       return { message: "Ungültiger Eintrag." };
     }
 
+    const links = await checkLinks(db, record.section, body as Entry);
+
+    if (links !== null) {
+      return { message: links };
+    }
+
     return { row: toDbRow(record.section, body as Entry) };
   },
-  checkUpdate: (_db, patch, existing): CheckResult => {
+  checkUpdate: async (db, patch, existing): Promise<CheckResult> => {
     const picked = pickPatch(patch, [
       "title",
       "detail",
@@ -159,6 +289,12 @@ export const studyConfig: CrudConfig = {
       "done",
       "reviewStage",
       "lastReviewedAt",
+      "parentId",
+      "sourceRefs",
+      "mastery",
+      "masteryEvidence",
+      "topicData",
+      "examData",
     ]);
 
     if (picked === null) {
@@ -183,6 +319,16 @@ export const studyConfig: CrudConfig = {
 
     if (!isValidEntry(merged)) {
       return { message: "Ungültige Änderung." };
+    }
+
+    const links = await checkLinks(
+      db,
+      current.section as StudySection,
+      merged as unknown as Entry,
+    );
+
+    if (links !== null) {
+      return { message: links };
     }
 
     const row = toDbRow(current.section, merged as unknown as Entry);

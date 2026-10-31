@@ -46,6 +46,7 @@ import {
   isSummarizeResponse,
   isSummaryRecordList,
   isSynthesizeResponse,
+  isTopicsExtractResponse,
   MAX_CHUNKS_PER_DOC,
   processResponseOfExtractError,
   type DocumentCoverage,
@@ -57,12 +58,15 @@ import {
   type SummarizeResponse,
   type SummarySpanResult,
   type SynthesizeResponse,
+  type TopicsExtractResponse,
 } from "@/src/lib/study/protocol";
 import {
   coverageStats,
   groupChunksByUnit,
+  markCoveredGroups,
   planSummarySweep,
   selectQuestionWindow,
+  SUMMARY_SPAN_BUDGET_CHARS,
   targetQuestionCount,
 } from "@/src/lib/study/coverage";
 import {
@@ -70,10 +74,11 @@ import {
   saveDocumentSummary,
 } from "@/src/lib/study/localSummaries";
 import {
+  containingBaseSpan,
   groupSectionsForReduction,
   orderSpansForSynthesis,
+  pruneStaleSpans,
   resolveMarkersToLabels,
-  spanUnitCounts,
   validateSynthesisRefs,
 } from "@/src/lib/study/summaries";
 import { createId } from "@/src/lib/ids";
@@ -83,6 +88,13 @@ import {
   QuestionsTruncatedError,
   assertCompleteQuestions,
 } from "@/src/lib/study/questions";
+import {
+  MAX_EXTRACT_SPANS,
+  parseTopicsWithRepair,
+  topicExtractionPrompt,
+  TOPIC_EXTRACT_NUM_PREDICT,
+  TopicsParseError,
+} from "@/src/lib/study/topics";
 import type { AssistantLocale } from "@/src/lib/assistant/actions";
 import type { LlmMessage } from "@/src/lib/assistant/llm";
 import { retrieveStudy } from "./studyRetrieval";
@@ -691,7 +703,8 @@ export async function getDocumentCoverage(
 
 // ------------------------------------------------- summaries (4C)
 
-const LOCAL_BATCH_NUM_PREDICT = 1200;
+const LOCAL_BATCH_NUM_PREDICT = 2000;
+const LOCAL_MAX_BATCH_ATTEMPTS = 8;
 const LOCAL_SYNTHESIZE_NUM_PREDICT = 2000;
 const LOCAL_SYNTHESIS_INPUT_BUDGET_CHARS = 6000;
 const LOCAL_MAX_SYNTHESIS_LEVELS = 2;
@@ -720,7 +733,10 @@ export async function getSummaryState(
   return getDocumentSummary(id);
 }
 
-async function localPlan(id: string): Promise<{
+async function localPlan(
+  id: string,
+  splits: Record<string, number> = {},
+): Promise<{
   meta: { name: string };
   plan: ReturnType<typeof planSummarySweep>;
 }> {
@@ -737,13 +753,13 @@ async function localPlan(id: string): Promise<{
 
   const stored = await getDocumentChunks(id);
   const plan = planSummarySweep(
-    groupChunksByUnit(
-      (stored ?? []).map((chunk) => ({
-        index: chunk.index,
-        text: chunk.text,
-        refs: chunk.refs,
-      })),
-    ),
+    (stored ?? []).map((chunk) => ({
+      index: chunk.index,
+      text: chunk.text,
+      refs: chunk.refs,
+    })),
+    SUMMARY_SPAN_BUDGET_CHARS,
+    splits,
   );
 
   if (plan.length === 0) {
@@ -785,20 +801,16 @@ export async function summarizeNextSpan(
     return result.data;
   }
 
-  const { meta, plan } = await localPlan(id);
-  const planned = plan.map((span, order) => ({
-    key: span.key,
-    label: span.label,
-    order,
-  }));
-  const planKeys = new Set(plan.map((span) => span.key));
   const current = await getDocumentSummary(id);
-  let gid = generationId;
+  const active = current?.active ?? null;
+  const gid = generationId ?? createId();
+  let splits: Record<string, number> = {};
   let effective: SummarySpanResult[] = [];
-  let active = current?.active ?? null;
+  let startedAt = new Date().toISOString();
+  let preview: { text: string; refs: string[] } | null = null;
 
-  if (gid === null) {
-    gid = createId();
+  if (generationId === null) {
+    const { plan: fresh } = await localPlan(id);
 
     await saveDocumentSummary(id, {
       documentId: id,
@@ -806,10 +818,15 @@ export async function summarizeNextSpan(
       active,
       draft: {
         generationId: gid,
-        plannedSpans: planned,
+        plannedSpans: fresh.map((span, order) => ({
+          key: span.key,
+          label: span.label,
+          order,
+        })),
         spans: [],
+        splits: {},
         preview: null,
-        startedAt: new Date().toISOString(),
+        startedAt,
       },
     });
   } else {
@@ -819,127 +836,209 @@ export async function summarizeNextSpan(
       );
     }
 
-    active = current.active;
-    effective = current.draft.spans.filter((span) => planKeys.has(span.key));
+    splits = { ...(current.draft.splits ?? {}) };
+    startedAt = current.draft.startedAt;
+    preview = current.draft.preview;
+
+    const { plan: resumed } = await localPlan(id, splits);
+
+    effective = pruneStaleSpans(
+      resumed.flatMap((span) => span.units),
+      current.draft.spans,
+    );
   }
 
-  const doneKeys = new Set(effective.map((span) => span.key));
-  const nextIndex = plan.findIndex((span) => !doneKeys.has(span.key));
+  const stored = (await getDocumentChunks(id)) ?? [];
+  const coverable = stored.map((chunk) => ({
+    index: chunk.index,
+    text: chunk.text,
+    refs: chunk.refs,
+  }));
+  const documentName =
+    (await localListDocuments()).find((doc) => doc.id === id)?.name ??
+    "Dokument";
 
-  if (nextIndex === -1) {
-    const progress = spanUnitCounts(plan, [...doneKeys]);
+  for (
+    let attempt = 1;
+    attempt <= LOCAL_MAX_BATCH_ATTEMPTS;
+    attempt += 1
+  ) {
+    const plan = planSummarySweep(
+      coverable,
+      SUMMARY_SPAN_BUDGET_CHARS,
+      splits,
+    );
+    const labels = effective.map((span) => span.label);
+    const nextIndex = markCoveredGroups(plan, labels).findIndex(
+      (covered) => !covered,
+    );
+
+    if (nextIndex === -1) {
+      const progress = coverageStats(plan, labels);
+
+      await saveDocumentSummary(id, {
+        documentId: id,
+        status: active === null ? "partial" : "complete",
+        active,
+        draft: {
+          generationId: gid,
+          plannedSpans: plan.map((span, order) => ({
+            key: span.key,
+            label: span.label,
+            order,
+          })),
+          spans: effective,
+          splits,
+          preview,
+          startedAt,
+        },
+      });
+
+      return {
+        documentId: id,
+        generationId: gid,
+        span: { key: "", label: "", index: plan.length, total: plan.length },
+        text: "",
+        refs: [],
+        processedUnits: progress.coveredUnits,
+        usableUnits: progress.usableUnits,
+        percent: progress.percent,
+        done: true,
+        attempts: attempt - 1,
+      };
+    }
+
+    const next = plan[nextIndex] as (typeof plan)[number];
+    const wanted = new Set(next.chunkIndices);
+    const sources: GroundedSource[] = stored
+      .filter((chunk) => wanted.has(chunk.index))
+      .map((chunk, index) => ({
+        marker: `[Q${index + 1}]`,
+        documentName,
+        refLabel: formatSourceRefs(chunk.refs),
+        text: chunk.text,
+      }));
+
+    let raw: string;
+
+    try {
+      const chat = await groundedAnswer(
+        async (messages) => {
+          const result = await llmChatRemote(
+            messages,
+            LOCAL_BATCH_NUM_PREDICT,
+            fetcher,
+            signal,
+          );
+
+          assertCompleteQuestions(result);
+
+          return result.content;
+        },
+        batchSummaryPrompt(locale, documentName, next.label, sources),
+        toCitationSources(sources),
+        locale,
+      );
+
+      raw = chat.text;
+    } catch (error: unknown) {
+      if (!(error instanceof QuestionsTruncatedError)) throw error;
+
+      if (next.chunkIndices.length <= 1) {
+        throw new Error(
+          "Selbst der kleinste Abschnitt wurde abgeschnitten — der Entwurf bleibt gespeichert, bitte später erneut versuchen.",
+        );
+      }
+
+      const base = planSummarySweep(coverable, SUMMARY_SPAN_BUDGET_CHARS, {});
+      const baseKey = containingBaseSpan(base, next);
+
+      if (baseKey === null) throw error;
+
+      splits[baseKey] = (splits[baseKey] ?? 0) + 1;
+
+      await saveDocumentSummary(id, {
+        documentId: id,
+        status: active === null ? "partial" : "complete",
+        active,
+        draft: {
+          generationId: gid,
+          plannedSpans: plan.map((span, order) => ({
+            key: span.key,
+            label: span.label,
+            order,
+          })),
+          spans: effective,
+          splits,
+          preview,
+          startedAt,
+        },
+      });
+
+      continue;
+    }
+
+    const resolved = resolveMarkersToLabels(raw, sources);
+    const updated: SummarySpanResult[] = [
+      ...effective,
+      {
+        key: next.key,
+        label: next.label,
+        text: resolved.text,
+        refs: resolved.refs,
+        completedAt: new Date().toISOString(),
+      },
+    ];
+    const planAfter = planSummarySweep(
+      coverable,
+      SUMMARY_SPAN_BUDGET_CHARS,
+      splits,
+    );
+    const progress = coverageStats(
+      planAfter,
+      updated.map((span) => span.label),
+    );
 
     await saveDocumentSummary(id, {
       documentId: id,
       status: active === null ? "partial" : "complete",
       active,
-      draft:
-        current?.draft === undefined || current.draft === null
-          ? null
-          : { ...current.draft, plannedSpans: planned, spans: effective },
+      draft: {
+        generationId: gid,
+        plannedSpans: planAfter.map((span, order) => ({
+          key: span.key,
+          label: span.label,
+          order,
+        })),
+        spans: updated,
+        splits,
+        preview,
+        startedAt,
+      },
     });
 
     return {
       documentId: id,
       generationId: gid,
-      span: { key: "", label: "", index: plan.length, total: plan.length },
-      text: "",
-      refs: [],
-      processedUnits: progress.processedUnits,
+      span: {
+        key: next.key,
+        label: next.label,
+        index: nextIndex,
+        total: planAfter.length,
+      },
+      text: updated[updated.length - 1]?.text ?? "",
+      refs: updated[updated.length - 1]?.refs ?? [],
+      processedUnits: progress.coveredUnits,
       usableUnits: progress.usableUnits,
       percent: progress.percent,
-      done: true,
+      done: false,
+      attempts: attempt,
     };
   }
 
-  const next = plan[nextIndex] as (typeof plan)[number];
-  const stored = (await getDocumentChunks(id)) ?? [];
-  const wanted = new Set(next.chunkIndices);
-  const sources: GroundedSource[] = stored
-    .filter((chunk) => wanted.has(chunk.index))
-    .map((chunk, index) => ({
-      marker: `[Q${index + 1}]`,
-      documentName: meta.name,
-      refLabel: formatSourceRefs(chunk.refs),
-      text: chunk.text,
-    }));
-
-  let raw: string;
-
-  try {
-    const chat = await groundedAnswer(
-      async (messages) => {
-        const result = await llmChatRemote(
-          messages,
-          LOCAL_BATCH_NUM_PREDICT,
-          fetcher,
-          signal,
-        );
-
-        assertCompleteQuestions(result);
-
-        return result.content;
-      },
-      batchSummaryPrompt(locale, meta.name, next.label, sources),
-      toCitationSources(sources),
-      locale,
-    );
-
-    raw = chat.text;
-  } catch (error: unknown) {
-    if (error instanceof QuestionsTruncatedError) {
-      throw new Error(error.message);
-    }
-
-    throw error;
-  }
-
-  const resolved = resolveMarkersToLabels(raw, sources);
-  const updated: SummarySpanResult[] = [
-    ...effective,
-    {
-      key: next.key,
-      label: next.label,
-      text: resolved.text,
-      refs: resolved.refs,
-      completedAt: new Date().toISOString(),
-    },
-  ];
-  const progress = spanUnitCounts(
-    plan,
-    updated.map((span) => span.key),
+  throw new Error(
+    "Der Abschnitt wurde wiederholt abgeschnitten — der Entwurf bleibt gespeichert, bitte erneut versuchen.",
   );
-
-  await saveDocumentSummary(id, {
-    documentId: id,
-    status: active === null ? "partial" : "complete",
-    active,
-    draft: {
-      generationId: gid,
-      plannedSpans: planned,
-      spans: updated,
-      preview: current?.draft?.preview ?? null,
-      startedAt:
-        current?.draft?.startedAt ?? new Date().toISOString(),
-    },
-  });
-
-  return {
-    documentId: id,
-    generationId: gid,
-    span: {
-      key: next.key,
-      label: next.label,
-      index: nextIndex,
-      total: plan.length,
-    },
-    text: updated[updated.length - 1]?.text ?? "",
-    refs: updated[updated.length - 1]?.refs ?? [],
-    processedUnits: progress.processedUnits,
-    usableUnits: progress.usableUnits,
-    percent: progress.percent,
-    done: false,
-  };
 }
 
 /**
@@ -972,7 +1071,6 @@ export async function synthesizeDocumentSummary(
     return result.data;
   }
 
-  const { meta, plan } = await localPlan(id);
   const current = await getDocumentSummary(id);
 
   if (current === null || current.draft === null) {
@@ -985,16 +1083,18 @@ export async function synthesizeDocumentSummary(
     );
   }
 
-  const planKeys = new Set(plan.map((span) => span.key));
-  const effective = current.draft.spans.filter((span) =>
-    planKeys.has(span.key),
-  );
+  const { meta, plan } = await localPlan(id, current.draft.splits ?? {});
+  const planUnits = plan.flatMap((span) => span.units);
+  const effective = pruneStaleSpans(planUnits, current.draft.spans);
 
   if (effective.length === 0) {
     throw new Error("Noch keine Abschnitte zusammengefasst.");
   }
 
-  const complete = effective.length === plan.length;
+  const complete = markCoveredGroups(
+    plan,
+    effective.map((span) => span.label),
+  ).every(Boolean);
   let sections = orderSpansForSynthesis(effective).map((span) => ({
     label: span.label,
     text: span.text,
@@ -1102,4 +1202,159 @@ export async function synthesizeDocumentSummary(
 
     throw error;
   }
+}
+
+// --------------------------------------------------- topics (4D)
+
+/**
+ * Topic extraction: cloud mode calls the endpoint; local mode
+ * runs the same spans, prompt, budgets, and strict parser over
+ * IndexedDB chunks through /api/llm/chat. Returns proposals —
+ * merging and persistence stay with the caller (study store).
+ */
+export async function extractDocumentTopics(
+  id: string,
+  locale: AssistantLocale,
+  coveredLabels: string[],
+  maxSpans: number = MAX_EXTRACT_SPANS,
+  fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<TopicsExtractResponse> {
+  if (CLOUD_ENABLED) {
+    const result = await apiUnknown("/api/study/topics/extract", "POST", {
+      documentId: id,
+      locale,
+      coveredLabels,
+      maxSpans,
+    });
+
+    if (!result.ok) {
+      throw new Error(result.error);
+    }
+
+    if (!isTopicsExtractResponse(result.data)) {
+      throw new Error("Unerwartete Serverantwort.");
+    }
+
+    return result.data;
+  }
+
+  const docs = await localListDocuments();
+  const meta = docs.find((doc) => doc.id === id);
+
+  if (meta === undefined) {
+    throw new Error("Dokument nicht gefunden.");
+  }
+
+  if (meta.extractionStatus !== "completed") {
+    throw new Error("Das Dokument ist noch nicht verarbeitet.");
+  }
+
+  const stored = (await getDocumentChunks(id)) ?? [];
+  const plan = planSummarySweep(
+    stored.map((chunk) => ({
+      index: chunk.index,
+      text: chunk.text,
+      refs: chunk.refs,
+    })),
+    SUMMARY_SPAN_BUDGET_CHARS,
+    {},
+  );
+
+  if (plan.length === 0) {
+    return {
+      documentId: id,
+      documentName: meta.name,
+      spansDone: [],
+      skippedSpans: [],
+      topics: [],
+      droppedInvalid: 0,
+      droppedUngrounded: 0,
+      repaired: false,
+      insufficient: true,
+      done: true,
+    };
+  }
+
+  const usable = plan.flatMap((span) => span.units);
+  const covered = new Set(coveredLabels);
+  const limit =
+    Number.isInteger(maxSpans) && maxSpans > 0
+      ? Math.min(maxSpans, MAX_EXTRACT_SPANS)
+      : MAX_EXTRACT_SPANS;
+  const todo = plan
+    .filter((span) => !covered.has(span.label))
+    .slice(0, limit);
+  const spansDone: string[] = [];
+  const skippedSpans: string[] = [];
+  const topics: TopicsExtractResponse["topics"] = [];
+  let droppedInvalid = 0;
+  let droppedUngrounded = 0;
+  let repaired = false;
+
+  const call = async (messages: LlmMessage[]): Promise<string> => {
+    const result = await llmChatRemote(
+      messages,
+      TOPIC_EXTRACT_NUM_PREDICT,
+      fetcher,
+      signal,
+      "json",
+    );
+
+    assertCompleteQuestions(result);
+
+    return result.content;
+  };
+
+  for (const span of todo) {
+    const wanted = new Set(span.chunkIndices);
+    const sources: GroundedSource[] = stored
+      .filter((chunk) => wanted.has(chunk.index))
+      .map((chunk, index) => ({
+        marker: `[Q${index + 1}]`,
+        documentName: meta.name,
+        refLabel: formatSourceRefs(chunk.refs),
+        text: chunk.text,
+      }));
+
+    try {
+      const parsed = await parseTopicsWithRepair(
+        call,
+        topicExtractionPrompt(locale, meta.name, span.label, sources),
+        sources,
+        usable,
+        locale,
+      );
+
+      topics.push(...parsed.topics);
+      droppedInvalid += parsed.droppedInvalid;
+      droppedUngrounded += parsed.droppedUngrounded;
+      repaired = repaired || parsed.repaired;
+      spansDone.push(span.label);
+      covered.add(span.label);
+    } catch (error: unknown) {
+      if (
+        error instanceof QuestionsTruncatedError ||
+        error instanceof TopicsParseError
+      ) {
+        skippedSpans.push(span.label);
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  return {
+    documentId: id,
+    documentName: meta.name,
+    spansDone,
+    skippedSpans,
+    topics,
+    droppedInvalid,
+    droppedUngrounded,
+    repaired,
+    insufficient: false,
+    done: plan.every((span) => covered.has(span.label)),
+  };
 }

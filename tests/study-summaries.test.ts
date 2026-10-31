@@ -6,8 +6,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  containingBaseSpan,
   groupSectionsForReduction,
   orderSpansForSynthesis,
+  pruneStaleSpans,
   resolveMarkersToLabels,
   runSummarySweep,
   validateSynthesisRefs,
@@ -31,6 +33,7 @@ function batch(
     usableUnits: 8,
     percent: 50,
     done: false,
+    attempts: 1,
     ...overrides,
   };
 }
@@ -131,6 +134,40 @@ describe("summary helpers", () => {
       refs: [],
       invalid: [],
     });
+  });
+
+  it("finds containing base spans and prunes stale keys", () => {
+    const base = [
+      { key: "slide:1-10", units: [{ kind: "slide", from: 1, to: 10 }] },
+      { key: "slide:11-20", units: [{ kind: "slide", from: 11, to: 20 }] },
+    ] as const;
+
+    assert.equal(
+      containingBaseSpan([...base], {
+        units: [{ kind: "slide", from: 3, to: 5 }],
+      }),
+      "slide:1-10",
+    );
+    assert.equal(
+      containingBaseSpan([...base], {
+        units: [{ kind: "slide", from: 9, to: 12 }],
+      }),
+      null,
+    );
+    assert.deepEqual(
+      pruneStaleSpans(
+        [
+          { kind: "slide", from: 1, to: 10 },
+          { kind: "slide", from: 11, to: 20 },
+        ],
+        [
+          { key: "slide:1-5", label: "Folien 1–5" },
+          { key: "slide:30-32", label: "Folien 30–32" },
+          { key: "??", label: "Kapitel X" },
+        ],
+      ).map((span) => span.key),
+      ["slide:1-5"],
+    );
   });
 });
 
