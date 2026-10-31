@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Check,
   HelpCircle,
@@ -11,10 +11,11 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useLockBodyScroll } from "@/src/hooks/useLockBodyScroll";
 import { useQuiz } from "@/src/lib/db/useModules";
+import type { ListResource } from "@/src/lib/db/useRemoteResource";
 import { createQuizId, type QuizQuestion } from "@/src/lib/quiz";
 import type { Entry } from "@/src/lib/study";
+import { Modal } from "@/src/components/study/Modal";
 
 type RunState = {
   queue: QuizQuestion[];
@@ -28,12 +29,20 @@ export function QuizPanel({
   subjects,
   exams,
   topics,
+  store,
 }: {
   subjects: Entry[];
   exams: Entry[];
   topics: Entry[];
+  /**
+   * Shared quiz store (owned by the page so Wiederholung and the
+   * document library see the same questions). Falls back to an
+   * internal store when the panel is used standalone.
+   */
+  store?: ListResource<QuizQuestion>;
 }) {
-  const quizStore = useQuiz();
+  const internalStore = useQuiz();
+  const quizStore = store ?? internalStore;
   const questions = quizStore.items;
   const [subjectFilter, setSubjectFilter] = useState("all");
   const [editing, setEditing] = useState<"new" | string | null>(null);
@@ -47,26 +56,6 @@ export function QuizPanel({
   const [formError, setFormError] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [run, setRun] = useState<RunState | null>(null);
-
-  useLockBodyScroll(run !== null);
-
-  const runActive = run !== null;
-
-  useEffect(() => {
-    if (!runActive) return;
-
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setRun(null);
-      }
-    }
-
-    window.addEventListener("keydown", closeOnEscape);
-
-    return () => {
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [runActive]);
 
   const filtered =
     subjectFilter === "all"
@@ -226,7 +215,10 @@ export function QuizPanel({
   }
 
   return (
-    <section className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-5 sm:p-6">
+    <section
+      id="uebungsfragen"
+      className="scroll-mt-4 rounded-3xl border border-white/[0.08] bg-[#0d111b] p-5 sm:p-6"
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-start gap-3">
           <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-cyan-300/[0.08] text-cyan-300">
@@ -236,7 +228,8 @@ export function QuizPanel({
           <div>
             <h2 className="font-semibold">Übungsfragen</h2>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              Deine eigenen Fragen – manuell erstellt, keine KI.
+              Deine Fragen – manuell erstellt oder aus Dokumenten
+              generiert (KI).
             </p>
             <p className="mt-2 text-xs text-cyan-300">
               {questions.length}{" "}
@@ -509,8 +502,21 @@ export function QuizPanel({
                           </p>
                           <div className="mt-2 flex flex-wrap gap-2">
                             <span className="rounded-full bg-cyan-300/[0.08] px-2 py-1 text-[10px] text-cyan-200">
-                              {item.subject}
+                              {item.subject === "" ? "Ohne Fach" : item.subject}
                             </span>
+                            {item.source === "ai" && (
+                              <span className="rounded-full bg-amber-400/10 px-2 py-1 text-[10px] text-amber-300">
+                                KI-generiert
+                              </span>
+                            )}
+                            {(item.sourceRefs ?? []).map((ref) => (
+                              <span
+                                key={ref}
+                                className="rounded-full bg-white/[0.05] px-2 py-1 text-[10px] text-slate-400"
+                              >
+                                {ref}
+                              </span>
+                            ))}
                             {exam !== null && (
                               <span className="rounded-full bg-white/[0.05] px-2 py-1 text-[10px] text-slate-400">
                                 {exam}
@@ -578,26 +584,14 @@ export function QuizPanel({
       )}
 
       {run !== null && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="quiz-run-title"
-          className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center"
-        >
-          <button
-            aria-label="Quiz beenden"
-            onClick={() => setRun(null)}
-            className="jarvis-fade absolute inset-0 h-full w-full cursor-default bg-black/70"
-          />
-
-          <div className="jarvis-pop relative max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-3xl border border-white/10 bg-[#0d111b] p-6">
-            <div className="flex items-start justify-between gap-3">
+        <Modal titleId="quiz-run-title" onClose={() => setRun(null)}>
+          <div className="flex items-start justify-between gap-3">
               <div>
                 <h2 id="quiz-run-title" className="text-lg font-semibold">
                   {finished ? "Ergebnis" : `Frage ${run.index + 1} von ${run.queue.length}`}
                 </h2>
                 <p className="mt-1 text-xs text-slate-500">
-                  Richtig: {run.score} · Manuell erstellte Fragen
+                  Richtig: {run.score} von {run.queue.length}
                 </p>
               </div>
               <button
@@ -609,8 +603,9 @@ export function QuizPanel({
               </button>
             </div>
 
-            {finished || current === null ? (
-              <div className="jarvis-fade mt-6 text-center">
+            <div className="mt-5 min-h-0 flex-1 overflow-y-auto">
+              {finished || current === null ? (
+              <div className="jarvis-fade text-center">
                 <p className="text-4xl font-semibold tabular-nums text-cyan-200">
                   {run.score} / {run.queue.length}
                 </p>
@@ -640,7 +635,7 @@ export function QuizPanel({
                 </div>
               </div>
             ) : (
-              <div key={run.index} className="jarvis-fade mt-5">
+              <div key={run.index} className="jarvis-fade">
                 <p className="text-sm font-medium leading-6 text-slate-100">
                   {current.question}
                 </p>
@@ -751,9 +746,9 @@ export function QuizPanel({
                   </button>
                 </div>
               </div>
-            )}
-          </div>
-        </div>
+              )}
+            </div>
+        </Modal>
       )}
     </section>
   );

@@ -5,6 +5,7 @@ import {
   Download,
   Eye,
   FileText,
+  HelpCircle,
   Loader2,
   Pencil,
   Plus,
@@ -16,6 +17,9 @@ import {
   X,
 } from "lucide-react";
 import type { Entry } from "@/src/lib/study";
+import { useQuiz } from "@/src/lib/db/useModules";
+import type { ListResource } from "@/src/lib/db/useRemoteResource";
+import type { QuizQuestion } from "@/src/lib/quiz";
 import {
   EXTRACTION_STATUS_LABELS,
   KIND_LABELS,
@@ -39,13 +43,28 @@ import {
 } from "@/src/lib/db/documents";
 import {
   explainInDocument,
+  generateQuestionsForDocument,
+  getDocumentCoverage,
+  getSummaryState,
   processDocument,
-  summarizeDocument,
+  summarizeNextSpan,
+  synthesizeDocumentSummary,
 } from "@/src/lib/db/studyActions";
-import type { ProcessResponse } from "@/src/lib/study/protocol";
+import type {
+  DocumentCoverage,
+  DocumentSummary,
+  ProcessResponse,
+} from "@/src/lib/study/protocol";
+import { runSummarySweep } from "@/src/lib/study/summaries";
+import { toQuizQuestions } from "@/src/lib/study/questions";
+import {
+  DEFAULT_MAX_SAVED,
+  runQuestionBatches,
+} from "@/src/lib/study/batches";
 import type { AssistantLocale } from "@/src/lib/assistant/actions";
 import { createId } from "@/src/lib/ids";
 import { DocumentPreview } from "@/src/components/study/DocumentPreview";
+import { StudyResultModal } from "@/src/components/study/StudyResultModal";
 import { CLOUD_ENABLED } from "@/src/lib/db/mode";
 
 const STATUS_STYLES: Record<ExtractionStatus, string> = {
@@ -67,13 +86,36 @@ const KIND_FILTERS: { key: "all" | DocumentKind; label: string }[] = [
 
 type LibraryStatus = "loading" | "ready" | "unavailable" | "error";
 
+/** Questions requested per generation batch (one model call). */
+const QUESTIONS_BATCH_SIZE = 4;
+
+const UNIT_NOUNS: Record<DocumentKind, string> = {
+  pdf: "Seiten",
+  pptx: "Folien",
+  docx: "Absätze",
+  txt: "Abschnitte",
+  md: "Abschnitte",
+};
+
+function coverageLine(doc: DocumentMeta, coverage: DocumentCoverage): string {
+  const total =
+    coverage.totalPages !== null
+      ? `${coverage.totalPages} ${UNIT_NOUNS[doc.kind]} · `
+      : "";
+  const noun = coverage.questionCount === 1 ? "Frage" : "Fragen";
+
+  return `${total}${coverage.coveredUnits}/${coverage.usableUnits} abgedeckt (${coverage.percent} %) · ${coverage.questionCount} ${noun}`;
+}
+
 type AiResult =
   | {
       kind: "summary";
       text: string;
       refsUsed: string[];
-      truncated: boolean;
-      chunkCount: number;
+      complete: boolean;
+      spansDone: number;
+      spansTotal: number;
+      sections: { label: string; text: string }[];
     }
   | {
       kind: "explain";
@@ -85,10 +127,19 @@ type AiResult =
 export function DocumentLibrary({
   subjects,
   onSaveMaterial,
+  quizStore,
 }: {
   subjects: Entry[];
   onSaveMaterial: (entry: Entry) => Promise<void>;
+  /**
+   * Shared quiz store (owned by the page so generated questions
+   * appear in Übungsfragen and Wiederholung at once). Falls back
+   * to an internal store when used standalone.
+   */
+  quizStore?: ListResource<QuizQuestion>;
 }) {
+  const internalQuizStore = useQuiz();
+  const questions = quizStore ?? internalQuizStore;
   const [status, setStatus] = useState<LibraryStatus>("loading");
   const [reloadKey, setReloadKey] = useState(0);
   const [docs, setDocs] = useState<DocumentMeta[]>([]);
@@ -118,6 +169,36 @@ export function DocumentLibrary({
   const [aiQuestion, setAiQuestion] = useState("");
   const [aiResult, setAiResult] = useState<AiResult | null>(null);
   const [aiSaved, setAiSaved] = useState(false);
+  const [sBusyId, setSBusyId] = useState<string | null>(null);
+  const [sProgress, setSProgress] = useState<{
+    index: number;
+    total: number;
+    label: string;
+    percent: number;
+    processedUnits: number;
+    usableUnits: number;
+  } | null>(null);
+  const [summaryById, setSummaryById] = useState<
+    Record<string, DocumentSummary>
+  >({});
+  const sAbortRef = useRef<AbortController | null>(null);
+  const aiOpenRef = useRef<string | null>(null);
+  const sBusy = sBusyId !== null;
+  const [qBusyId, setQBusyId] = useState<string | null>(null);
+  const [qProgress, setQProgress] = useState<{
+    batch: number;
+    saved: number;
+    labels: string[];
+  } | null>(null);
+  const [coverageById, setCoverageById] = useState<
+    Record<string, DocumentCoverage>
+  >({});
+  const qAbortRef = useRef<AbortController | null>(null);
+  const qBusy = qBusyId !== null;
+  const [resultModal, setResultModal] = useState<{
+    doc: DocumentMeta;
+    result: AiResult;
+  } | null>(null);
   const [locale, setLocale] = useState<AssistantLocale>("de");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -132,6 +213,14 @@ export function DocumentLibrary({
       setLocale("ru");
     }
   }, []);
+
+  useEffect(
+    () => () => {
+      qAbortRef.current?.abort();
+      sAbortRef.current?.abort();
+    },
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -408,42 +497,225 @@ export function DocumentLibrary({
     }
   }
 
+  function summaryButtonOf(doc: DocumentMeta): {
+    label: string;
+    startNew: boolean;
+  } {
+    const state = summaryById[doc.id];
+
+    if (
+      state?.draft !== null &&
+      state?.draft !== undefined &&
+      state.draft.spans.length < state.draft.plannedSpans.length
+    ) {
+      return {
+        label: `Fortsetzen (${state.draft.spans.length}/${state.draft.plannedSpans.length})`,
+        startNew: false,
+      };
+    }
+
+    if (state?.active !== null && state?.active !== undefined) {
+      return { label: "Neu zusammenfassen", startNew: true };
+    }
+
+    return { label: "Zusammenfassen", startNew: false };
+  }
+
   function toggleAi(doc: DocumentMeta) {
     if (aiOpenId === doc.id) {
+      aiOpenRef.current = null;
       setAiOpenId(null);
     } else {
+      aiOpenRef.current = doc.id;
       setAiOpenId(doc.id);
       setAiResult(null);
       setAiError(null);
       setAiSaved(false);
       setAiQuestion("");
+      void refreshCoverage(doc.id);
+      void refreshSummary(doc.id).then((state) => {
+        if (aiOpenRef.current !== doc.id || state === null) return;
+
+        const shown = summaryResultOf(state, null, { done: 0, total: 0 });
+
+        if (shown !== null) setAiResult(shown);
+      });
     }
   }
 
-  async function summarizeDoc(doc: DocumentMeta) {
-    if (aiBusy) return;
+  async function refreshSummary(
+    id: string,
+  ): Promise<DocumentSummary | null> {
+    try {
+      const state = await getSummaryState(id);
 
-    setAiBusy(true);
+      setSummaryById((current) => {
+        if (state === null) {
+          if (!(id in current)) return current;
+
+          const next = { ...current };
+          delete next[id];
+
+          return next;
+        }
+
+        return { ...current, [id]: state };
+      });
+
+      return state;
+    } catch {
+      return null;
+    }
+  }
+
+  function cancelSummary(): void {
+    sAbortRef.current?.abort();
+  }
+
+  function summaryResultOf(
+    state: DocumentSummary,
+    synthesis: { text: string; refs: string[]; complete: boolean } | null,
+    counts: { done: number; total: number },
+  ): AiResult | null {
+    if (synthesis !== null) {
+      const spans = synthesis.complete
+        ? []
+        : (state.draft?.spans ?? []);
+
+      return {
+        kind: "summary",
+        text: synthesis.text,
+        refsUsed: synthesis.refs,
+        complete: synthesis.complete,
+        spansDone: synthesis.complete ? counts.done : spans.length,
+        spansTotal: synthesis.complete
+          ? counts.total
+          : (state.draft?.plannedSpans.length ?? spans.length),
+        sections: spans.map((span) => ({
+          label: span.label,
+          text: span.text,
+        })),
+      };
+    }
+
+    if (state.active !== null) {
+      return {
+        kind: "summary",
+        text: state.active.text,
+        refsUsed: state.active.refs,
+        complete: true,
+        spansDone: 0,
+        spansTotal: 0,
+        sections: [],
+      };
+    }
+
+    if (state.draft?.preview !== null && state.draft?.preview !== undefined) {
+      const spans = state.draft.spans;
+
+      return {
+        kind: "summary",
+        text: state.draft.preview.text,
+        refsUsed: state.draft.preview.refs,
+        complete: false,
+        spansDone: spans.length,
+        spansTotal: state.draft.plannedSpans.length,
+        sections: spans.map((span) => ({ label: span.label, text: span.text })),
+      };
+    }
+
+    return null;
+  }
+
+  async function startSummary(doc: DocumentMeta, startNew: boolean) {
+    if (qBusyId !== null || sBusyId !== null || aiBusy) return;
+
+    const controller = new AbortController();
+    sAbortRef.current = controller;
+    setSBusyId(doc.id);
+    setSProgress({
+      index: 0,
+      total: 0,
+      label: "",
+      percent: 0,
+      processedUnits: 0,
+      usableUnits: 0,
+    });
     setAiError(null);
     setAiSaved(false);
+    setNotice(null);
 
     try {
-      const result = await summarizeDocument(doc.id, locale);
-      setAiResult({
-        kind: "summary",
-        text: result.summary,
-        refsUsed: result.refsUsed,
-        truncated: result.truncated,
-        chunkCount: result.chunkCount,
+      const result = await runSummarySweep({
+        loadDraft: () => getSummaryState(doc.id),
+        generateSpan: (generationId) =>
+          summarizeNextSpan(
+            doc.id,
+            locale,
+            generationId,
+            fetch,
+            controller.signal,
+          ),
+        synthesize: (generationId) =>
+          synthesizeDocumentSummary(
+            doc.id,
+            locale,
+            generationId,
+            fetch,
+            controller.signal,
+          ),
+        startNew,
+        signal: controller.signal,
+        onSpan: (progress) => setSProgress({ ...progress }),
       });
-    } catch (summarizeError) {
+      const state = await refreshSummary(doc.id);
+      const shown =
+        state === null
+          ? null
+          : summaryResultOf(state, result.synthesis, {
+              done: result.spansDone,
+              total: result.spansTotal,
+            });
+
+      if (shown !== null) setAiResult(shown);
+
+      if (result.status === "cancelled") {
+        setNotice(
+          result.spansDone === 0
+            ? "Abgebrochen."
+            : `Abgebrochen — ${result.spansDone} ${result.spansDone === 1 ? "Abschnitt" : "Abschnitte"} bleiben gespeichert.`,
+        );
+      } else if (result.status === "error") {
+        if (result.spansDone > 0) {
+          setNotice(
+            `${result.spansDone} ${result.spansDone === 1 ? "Abschnitt" : "Abschnitte"} gesichert, dann abgebrochen: ${result.error ?? "unbekannter Fehler"}`,
+          );
+        } else {
+          setAiError(result.error ?? "Zusammenfassung fehlgeschlagen.");
+        }
+      } else if (result.status === "complete") {
+        setNotice(
+          `Vollständige Zusammenfassung gespeichert (${result.spansDone} ${result.spansDone === 1 ? "Abschnitt" : "Abschnitte"}).`,
+        );
+      } else if (result.error !== null) {
+        setNotice(
+          `Unvollständig: ${result.error} (${result.spansDone}/${result.spansTotal} Abschnitte gesichert) — erneut versuchen.`,
+        );
+      } else {
+        setNotice(
+          `${result.spansDone}/${result.spansTotal} Abschnitte gesichert — Fortsetzen für den Rest.`,
+        );
+      }
+    } catch (summaryError) {
       setAiError(
-        summarizeError instanceof Error
-          ? summarizeError.message
+        summaryError instanceof Error
+          ? summaryError.message
           : "Zusammenfassung fehlgeschlagen.",
       );
     } finally {
-      setAiBusy(false);
+      sAbortRef.current = null;
+      setSBusyId(null);
+      setSProgress(null);
     }
   }
 
@@ -475,25 +747,25 @@ export function DocumentLibrary({
     }
   }
 
-  async function saveAiResult(doc: DocumentMeta) {
-    if (aiResult === null || aiSaving) return;
+  async function saveAiResult(doc: DocumentMeta, result: AiResult) {
+    if (aiSaving) return;
 
     setAiSaving(true);
 
     try {
       const title =
-        aiResult.kind === "summary"
+        result.kind === "summary"
           ? `Zusammenfassung: ${doc.name}`
           : `Frage zu ${doc.name}`;
       const refs =
-        aiResult.refsUsed.length > 0
-          ? `\n\nQuellen: ${aiResult.refsUsed.join("; ")}`
+        result.refsUsed.length > 0
+          ? `\n\nQuellen: ${result.refsUsed.join("; ")}`
           : "";
 
       await onSaveMaterial({
         id: createId(),
         title,
-        detail: `${aiResult.text}${refs}`,
+        detail: `${result.text}${refs}`,
         ...(doc.subject !== null ? { subject: doc.subject } : {}),
       });
       setAiSaved(true);
@@ -509,10 +781,197 @@ export function DocumentLibrary({
     }
   }
 
+  async function refreshCoverage(
+    id: string,
+    justSaved: QuizQuestion[] = [],
+  ): Promise<void> {
+    const items = questions.items.filter((item) => item.documentId === id);
+    const labels = [
+      ...items.flatMap((item) => item.sourceRefs ?? []),
+      ...justSaved.flatMap((item) => item.sourceRefs ?? []),
+    ];
+    const ids = new Set([
+      ...items.map((item) => item.id),
+      ...justSaved.map((item) => item.id),
+    ]);
+
+    try {
+      const snapshot = await getDocumentCoverage(id, labels, ids.size);
+
+      setCoverageById((current) => ({ ...current, [id]: snapshot }));
+    } catch {
+      // Coverage is derived display data: never fail the flow.
+    }
+  }
+
+  function cancelQuestions(): void {
+    qAbortRef.current?.abort();
+  }
+
+  async function generateQuestions(doc: DocumentMeta) {
+    if (qBusyId !== null || aiBusy || questions.loading) return;
+
+    const target = coverageById[doc.id]?.target;
+    const docCount = questions.items.filter(
+      (item) => item.documentId === doc.id,
+    ).length;
+
+    if (target !== undefined && target > 0 && docCount >= target) {
+      setAiError(null);
+      setNotice(
+        `Ziel erreicht — ${docCount} ${docCount === 1 ? "Frage" : "Fragen"} für dieses Dokument.`,
+      );
+      return;
+    }
+
+    const maxSaved =
+      target === undefined
+        ? DEFAULT_MAX_SAVED
+        : Math.min(DEFAULT_MAX_SAVED, Math.max(1, target - docCount));
+    const controller = new AbortController();
+    qAbortRef.current = controller;
+    setQBusyId(doc.id);
+    setQProgress({ batch: 0, saved: 0, labels: [] });
+    setAiError(null);
+    setNotice(null);
+
+    try {
+      const result = await runQuestionBatches({
+        existing: questions.items,
+        mapResponse: (response) =>
+          toQuizQuestions(response.questions, {
+            documentId: doc.id,
+            subject: response.subject ?? doc.subject ?? "",
+          }),
+        maxSaved,
+        signal: controller.signal,
+        onBatch: (progress) =>
+          setQProgress({
+            batch: progress.batch,
+            saved: progress.saved,
+            labels: progress.labels,
+          }),
+        generate: (coveredRefs) =>
+          generateQuestionsForDocument(
+            doc.id,
+            locale,
+            QUESTIONS_BATCH_SIZE,
+            fetch,
+            controller.signal,
+            coveredRefs,
+          ),
+        // Sequential writes: the store serializes cloud mutations.
+        save: async (fresh) => {
+          for (const item of fresh) {
+            const created = await questions.create(item);
+
+            if (!created.ok) {
+              throw new Error(created.error);
+            }
+          }
+        },
+      });
+
+      const noun = result.saved.length === 1 ? "Frage" : "Fragen";
+      const skipped = result.skippedExact + result.skippedNear;
+      const parts = [`${result.saved.length} ${noun} gespeichert`];
+
+      if (skipped > 0) {
+        const detail =
+          result.skippedNear > 0
+            ? ` (davon ${result.skippedNear} ähnlich)`
+            : "";
+        parts.push(
+          `${skipped} ${skipped === 1 ? "Duplikat" : "Duplikate"} übersprungen${detail}`,
+        );
+      }
+
+      if (result.droppedInvalid > 0) {
+        parts.push(`${result.droppedInvalid} ungültig verworfen`);
+      }
+
+      if (result.status === "cancelled") {
+        setNotice(
+          result.saved.length === 0
+            ? "Abgebrochen."
+            : `Abgebrochen — ${result.saved.length} ${noun} bleiben gespeichert.`,
+        );
+      } else if (result.status === "error" && result.saved.length === 0) {
+        setAiError(result.error ?? "Fragen konnten nicht erstellt werden.");
+      } else if (result.status === "error") {
+        parts.push(`unvollständig: ${result.error ?? "abgebrochen"}`);
+        setNotice(
+          `${parts.join(" · ")} — siehe Übungsfragen und Wiederholung unten.`,
+        );
+      } else if (result.status === "saturated") {
+        const full =
+          result.coverage !== null &&
+          result.coverage.usableUnits > 0 &&
+          result.coverage.coveredUnits >= result.coverage.usableUnits;
+
+        if (result.saved.length === 0) {
+          setNotice(
+            full
+              ? "Keine neuen Fragen — alle Abschnitte sind bereits abgedeckt."
+              : "Keine neuen Fragen gefunden (nur Duplikate).",
+          );
+        } else {
+          parts.push(
+            full
+              ? "alle Abschnitte abgedeckt"
+              : "keine weiteren neuen Fragen",
+          );
+          setNotice(
+            `${parts.join(" · ")} — siehe Übungsfragen und Wiederholung unten.`,
+          );
+        }
+      } else if (result.savedCapReached) {
+        parts.push("erneut klicken für mehr");
+        setNotice(
+          `${parts.join(" · ")} — siehe Übungsfragen und Wiederholung unten.`,
+        );
+      } else {
+        setNotice(
+          `${parts.join(" · ")} — siehe Übungsfragen und Wiederholung unten.`,
+        );
+      }
+
+      if (result.saved.length > 0) {
+        await refreshCoverage(doc.id, result.saved);
+      }
+    } catch (questionsError) {
+      setAiError(
+        questionsError instanceof Error
+          ? questionsError.message
+          : "Fragen konnten nicht erstellt werden.",
+      );
+    } finally {
+      qAbortRef.current = null;
+      setQBusyId(null);
+      setQProgress(null);
+    }
+  }
+
   async function confirmDelete(id: string) {
     try {
       await deleteDocument(id);
       setDocs((current) => current.filter((item) => item.id !== id));
+      setCoverageById((current) => {
+        if (!(id in current)) return current;
+
+        const next = { ...current };
+        delete next[id];
+
+        return next;
+      });
+      setSummaryById((current) => {
+        if (!(id in current)) return current;
+
+        const next = { ...current };
+        delete next[id];
+
+        return next;
+      });
       setConfirmDeleteId(null);
       setNotice("Dokument wurde gelöscht.");
     } catch (deleteError) {
@@ -693,11 +1152,12 @@ export function DocumentLibrary({
                 </p>
               </div>
 
-              {pendingError !== null && (
-                <p role="alert" className="mt-3 text-sm text-rose-300">
-                  {pendingError}
-                </p>
-              )}
+              <p
+                role="alert"
+                className="mt-3 min-h-5 text-sm leading-5 text-rose-300"
+              >
+                {pendingError}
+              </p>
 
               {pendingFile !== null && (
                 <div className="mt-3 space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
@@ -745,14 +1205,16 @@ export function DocumentLibrary({
                     <button
                       onClick={saveUpload}
                       disabled={saving}
-                      className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-sm font-medium text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
+                      aria-busy={saving}
+                      className="flex min-w-0 flex-1 items-center justify-center gap-2 rounded-xl bg-cyan-300 px-4 py-2.5 text-sm font-medium text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      {saving && (
-                        <Loader2
-                          size={16}
-                          className="motion-safe:animate-spin"
-                        />
-                      )}
+                      <Loader2
+                        size={16}
+                        aria-hidden="true"
+                        className={
+                          saving ? "motion-safe:animate-spin" : "invisible"
+                        }
+                      />
                       {saving ? "Wird gespeichert …" : "Hochladen"}
                     </button>
                     <button
@@ -868,7 +1330,7 @@ export function DocumentLibrary({
                 </button>
               </div>
             ) : (
-              <ul className="space-y-2">
+              <ul className="grid items-start gap-3 sm:grid-cols-2">
                 {visibleDocs.map((doc) => (
                   <li
                     key={doc.id}
@@ -887,6 +1349,11 @@ export function DocumentLibrary({
                           {KIND_LABELS[doc.kind]} · {formatBytes(doc.size)} ·{" "}
                           {formatUploadDate(doc.uploadedAt)}
                         </p>
+                        {coverageById[doc.id] !== undefined && (
+                          <p className="mt-1 text-xs tabular-nums text-slate-500">
+                            {coverageLine(doc, coverageById[doc.id])}
+                          </p>
+                        )}
 
                         <div className="mt-2 flex flex-wrap gap-2">
                           {doc.subject !== null && (
@@ -936,7 +1403,7 @@ export function DocumentLibrary({
                         </div>
 
                         {doc.description !== "" && (
-                          <p className="mt-2 break-words text-xs leading-5 text-slate-500">
+                          <p className="mt-2 line-clamp-2 break-words text-xs leading-5 text-slate-500">
                             {doc.description}
                           </p>
                         )}
@@ -1031,15 +1498,89 @@ export function DocumentLibrary({
                     {aiOpenId === doc.id && (
                       <div className="jarvis-fade mt-3 space-y-3 rounded-2xl border border-cyan-300/15 bg-cyan-300/[0.03] p-4">
                         <div className="flex flex-wrap gap-2">
+                          {(() => {
+                            const summary = summaryButtonOf(doc);
+
+                            return (
+                              <button
+                                onClick={() => startSummary(doc, summary.startNew)}
+                                disabled={aiBusy || qBusy || sBusy}
+                                className="flex items-center gap-1.5 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-medium text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                {sBusyId === doc.id ? (
+                                  <Loader2
+                                    size={13}
+                                    className="motion-safe:animate-spin"
+                                  />
+                                ) : (
+                                  <Sparkles size={13} />
+                                )}
+                                {sBusyId === doc.id
+                                  ? "Fasst zusammen …"
+                                  : summary.label}
+                              </button>
+                            );
+                          })()}
                           <button
-                            onClick={() => summarizeDoc(doc)}
-                            disabled={aiBusy}
-                            className="flex items-center gap-1.5 rounded-xl bg-cyan-300 px-4 py-2 text-xs font-medium text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
+                            onClick={() => generateQuestions(doc)}
+                            disabled={aiBusy || qBusy || sBusy || questions.loading}
+                            title="Erstellt Prüfungsfragen aus diesem Dokument für Übungsfragen und Wiederholung"
+                            className="flex items-center gap-1.5 rounded-xl border border-cyan-300/25 px-4 py-2 text-xs text-cyan-200 transition hover:border-cyan-300/50 disabled:cursor-not-allowed disabled:opacity-50"
                           >
-                            <Sparkles size={13} />
-                            Zusammenfassen
+                            {qBusy ? (
+                              <Loader2
+                                size={13}
+                                className="motion-safe:animate-spin"
+                              />
+                            ) : (
+                              <HelpCircle size={13} />
+                            )}
+                            {qBusy ? "Erstellt Fragen …" : "Fragen generieren"}
                           </button>
                         </div>
+
+                        {qBusyId === doc.id && qProgress !== null && (
+                          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/[0.06] bg-black/20 px-3 py-2">
+                            <Loader2
+                              size={13}
+                              className="shrink-0 text-slate-400 motion-safe:animate-spin"
+                            />
+                            <p className="min-w-0 flex-1 text-xs text-slate-400">
+                              Stapel {Math.max(qProgress.batch, 1)} ·{" "}
+                              {qProgress.saved}{" "}
+                              {qProgress.saved === 1 ? "Frage" : "Fragen"}{" "}
+                              gespeichert
+                              {qProgress.labels.length > 0 &&
+                                ` · Neue Abschnitte: ${qProgress.labels.join(", ")}`}
+                            </p>
+                            <button
+                              onClick={cancelQuestions}
+                              className="shrink-0 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-slate-300 transition hover:border-rose-400/40 hover:text-rose-200"
+                            >
+                              Abbrechen
+                            </button>
+                          </div>
+                        )}
+
+                        {sBusyId === doc.id && sProgress !== null && (
+                          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/[0.06] bg-black/20 px-3 py-2">
+                            <Loader2
+                              size={13}
+                              className="shrink-0 text-slate-400 motion-safe:animate-spin"
+                            />
+                            <p className="min-w-0 flex-1 text-xs text-slate-400">
+                              {sProgress.total === 0
+                                ? "Zusammenfassung · Stapel werden geplant …"
+                                : `Zusammenfassung · Stapel ${sProgress.index + 1}/${sProgress.total} · ${sProgress.label} · ${sProgress.processedUnits}/${sProgress.usableUnits} ${UNIT_NOUNS[doc.kind]} (${sProgress.percent} %)`}
+                            </p>
+                            <button
+                              onClick={cancelSummary}
+                              className="shrink-0 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-slate-300 transition hover:border-rose-400/40 hover:text-rose-200"
+                            >
+                              Abbrechen
+                            </button>
+                          </div>
+                        )}
 
                         <div className="flex gap-2">
                           <input
@@ -1050,7 +1591,7 @@ export function DocumentLibrary({
                             onKeyDown={(key) => {
                               if (key.key === "Enter") void askDoc(doc);
                             }}
-                            disabled={aiBusy}
+                            disabled={aiBusy || qBusy || sBusy}
                             placeholder="Frage zum Dokument …"
                             aria-label="Frage zum Dokument"
                             maxLength={1000}
@@ -1058,14 +1599,19 @@ export function DocumentLibrary({
                           />
                           <button
                             onClick={() => askDoc(doc)}
-                            disabled={aiBusy || aiQuestion.trim() === ""}
+                            disabled={
+                              aiBusy ||
+                              qBusy ||
+                              sBusy ||
+                              aiQuestion.trim() === ""
+                            }
                             className="shrink-0 rounded-xl border border-cyan-300/25 px-4 py-2 text-xs text-cyan-200 transition hover:border-cyan-300/50 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             Fragen
                           </button>
                         </div>
 
-                        {aiBusy && (
+                        {(aiBusy || qBusy || sBusy) && (
                           <p className="flex items-center gap-2 text-sm text-slate-400">
                             <Loader2
                               size={15}
@@ -1083,31 +1629,16 @@ export function DocumentLibrary({
 
                         {aiResult !== null && (
                           <div className="rounded-xl border border-white/[0.06] bg-black/20 p-3">
-                            <p className="whitespace-pre-wrap text-sm leading-6 text-slate-200">
+                            <p className="line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-slate-200">
                               {aiResult.text}
                             </p>
-                            {aiResult.refsUsed.length > 0 && (
-                              <p className="mt-2 text-xs text-slate-500">
-                                Quellen: {aiResult.refsUsed.join("; ")}
-                              </p>
-                            )}
-                            {aiResult.kind === "summary" &&
-                              aiResult.truncated && (
-                                <p className="mt-1 text-xs text-amber-200/80">
-                                  Hinweis: Nur die ersten Abschnitte passten
-                                  in den KI-Kontext.
-                                </p>
-                              )}
                             <button
-                              onClick={() => saveAiResult(doc)}
-                              disabled={aiSaving || aiSaved}
-                              className="mt-3 rounded-xl border border-white/10 px-4 py-2 text-xs text-slate-300 transition hover:border-cyan-300/30 disabled:cursor-not-allowed disabled:opacity-50"
+                              onClick={() =>
+                                setResultModal({ doc, result: aiResult })
+                              }
+                              className="mt-2 text-xs text-cyan-300/80 transition hover:text-cyan-200"
                             >
-                              {aiSaving
-                                ? "Wird gespeichert …"
-                                : aiSaved
-                                  ? "Gespeichert"
-                                  : "Als Lernmaterial speichern"}
+                              Mehr anzeigen
                             </button>
                           </div>
                         )}
@@ -1150,6 +1681,42 @@ export function DocumentLibrary({
           doc={previewDoc}
           onClose={() => setPreviewId(null)}
           onDownload={() => downloadDoc(previewDoc)}
+        />
+      )}
+
+      {resultModal !== null && (
+        <StudyResultModal
+          title={
+            resultModal.result.kind === "summary"
+              ? `Zusammenfassung: ${resultModal.doc.name}`
+              : `Frage zu ${resultModal.doc.name}`
+          }
+          meta={
+            resultModal.doc.subject === null
+              ? undefined
+              : resultModal.doc.subject
+          }
+          text={resultModal.result.text}
+          refsUsed={resultModal.result.refsUsed}
+          note={
+            resultModal.result.kind === "summary"
+              ? resultModal.result.complete
+                ? resultModal.result.spansTotal > 0
+                  ? `Finale Synthese aus ${resultModal.result.spansTotal} Abschnitten.`
+                  : "Finale Synthese."
+                : `Unvollständig (${resultModal.result.spansDone}/${resultModal.result.spansTotal} Abschnitte).`
+              : null
+          }
+          sections={
+            resultModal.result.kind === "summary"
+              ? resultModal.result.sections
+              : undefined
+          }
+          saveState={
+            aiSaving ? "saving" : aiSaved ? "saved" : "idle"
+          }
+          onSave={() => saveAiResult(resultModal.doc, resultModal.result)}
+          onClose={() => setResultModal(null)}
         />
       )}
     </div>

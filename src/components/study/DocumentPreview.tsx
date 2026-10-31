@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Download, FileText, Loader2, X } from "lucide-react";
-import { useLockBodyScroll } from "@/src/hooks/useLockBodyScroll";
+import { Modal } from "@/src/components/study/Modal";
 import {
   formatBytes,
   getDocumentBlob,
@@ -26,22 +26,6 @@ export function DocumentPreview({
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  useLockBodyScroll(true);
-
-  useEffect(() => {
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-
-    window.addEventListener("keydown", closeOnEscape);
-
-    return () => {
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [onClose]);
 
   useEffect(() => {
     let cancelled = false;
@@ -114,20 +98,12 @@ export function DocumentPreview({
   }, [doc.id, doc.kind]);
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="document-preview-title"
-      className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center"
+    <Modal
+      titleId="document-preview-title"
+      onClose={onClose}
+      maxWidth="max-w-3xl"
     >
-      <button
-        aria-label="Schließen"
-        onClick={onClose}
-        className="jarvis-fade absolute inset-0 h-full w-full cursor-default bg-black/70"
-      />
-
-      <div className="jarvis-pop relative flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-white/10 bg-[#0d111b] p-6">
-        <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2
               id="document-preview-title"
@@ -214,7 +190,6 @@ export function DocumentPreview({
             Schließen
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

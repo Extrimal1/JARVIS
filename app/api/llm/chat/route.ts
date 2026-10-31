@@ -34,7 +34,24 @@ async function handlePost(request: NextRequest) {
   try {
     const result = await chatWithOllama(body.messages, body.options ?? {});
 
-    return ok({ content: result.content, model: result.model });
+    // Opt-in local diagnosis for structured generations only:
+    // generated output, capped, never prompts or user data.
+    if (
+      process.env.STUDY_DEBUG_RAW === "1" &&
+      body.options?.format === "json"
+    ) {
+      console.log(
+        `[api:llm] DEBUG raw json response (${result.content.length} chars): ${result.content.slice(0, 1000)}`,
+      );
+    }
+
+    return ok({
+      content: result.content,
+      model: result.model,
+      doneReason: result.doneReason,
+      evalCount: result.evalCount,
+      thinkingChars: result.thinkingChars,
+    });
   } catch (error) {
     if (isProviderError(error)) {
       if (error.code === "cancelled") {

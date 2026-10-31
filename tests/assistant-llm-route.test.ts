@@ -121,8 +121,10 @@ describe("POST /api/llm/chat", () => {
     process.env.OLLAMA_MODEL = "qwen3.5:4b";
     mockFetchJson({
       model: "qwen3.5:4b",
-      message: { content: '{"final": "Hallo!"}' },
+      message: { content: '{"final": "Hallo!"}', thinking: "hmm" },
       done: true,
+      done_reason: "stop",
+      eval_count: 7,
     });
 
     const { status, envelope } = await postJson({
@@ -137,6 +139,75 @@ describe("POST /api/llm/chat", () => {
 
     assert.equal(envelope.data.content, '{"final": "Hallo!"}');
     assert.equal(envelope.data.model, "qwen3.5:4b");
+    assert.equal(envelope.data.doneReason, "stop");
+    assert.equal(envelope.data.evalCount, 7);
+    assert.equal(envelope.data.thinkingChars, 3);
+  });
+
+  it("logs raw json responses only with STUDY_DEBUG_RAW=1", async () => {
+    process.env.OLLAMA_MODEL = "qwen3.5:4b";
+    mockFetchJson({
+      model: "qwen3.5:4b",
+      message: { content: "[1]" },
+      done: true,
+    });
+
+    const lines: string[] = [];
+    const realLog = console.log;
+    const savedFlag = process.env.STUDY_DEBUG_RAW;
+    console.log = ((...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    }) as typeof console.log;
+    process.env.STUDY_DEBUG_RAW = "1";
+
+    try {
+      await postJson({
+        messages: [{ role: "user", content: "x" }],
+        options: { format: "json" },
+      });
+    } finally {
+      console.log = realLog;
+
+      if (savedFlag === undefined) delete process.env.STUDY_DEBUG_RAW;
+      else process.env.STUDY_DEBUG_RAW = savedFlag;
+    }
+
+    assert.ok(
+      lines.some(
+        (line) => line.includes("[api:llm] DEBUG") && line.includes("[1]"),
+      ),
+    );
+  });
+
+  it("skips raw logging for free text even with the flag", async () => {
+    process.env.OLLAMA_MODEL = "qwen3.5:4b";
+    mockFetchJson({
+      model: "qwen3.5:4b",
+      message: { content: "Hallo" },
+      done: true,
+    });
+
+    const lines: string[] = [];
+    const realLog = console.log;
+    const savedFlag = process.env.STUDY_DEBUG_RAW;
+    console.log = ((...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    }) as typeof console.log;
+    process.env.STUDY_DEBUG_RAW = "1";
+
+    try {
+      await postJson({ messages: [{ role: "user", content: "x" }] });
+    } finally {
+      console.log = realLog;
+
+      if (savedFlag === undefined) delete process.env.STUDY_DEBUG_RAW;
+      else process.env.STUDY_DEBUG_RAW = savedFlag;
+    }
+
+    assert.equal(
+      lines.filter((line) => line.includes("DEBUG")).length,
+      0,
+    );
   });
 
   it("rejects invalid bodies with 400 (never 500s on garbage)", async () => {

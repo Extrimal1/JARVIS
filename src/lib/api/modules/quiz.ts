@@ -2,6 +2,7 @@ import {
   isQuizQuestion,
   isQuizQuestionList,
   type QuizQuestion,
+  type QuizReviewStatus,
 } from "@/src/lib/quiz";
 import { dbGetOne } from "@/src/lib/supabase/db";
 import {
@@ -11,7 +12,36 @@ import {
   type CrudConfig,
 } from "../crud";
 
-function toDomain(row: Record<string, unknown>): unknown {
+function countOr(value: unknown, fallback: number): number {
+  return typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0
+    ? value
+    : fallback;
+}
+
+function difficultyOr(value: unknown, fallback: number): number {
+  return typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= 5
+    ? value
+    : fallback;
+}
+
+function reviewStatusOr(
+  value: unknown,
+  fallback: QuizReviewStatus,
+): QuizReviewStatus {
+  return value === "new" ||
+    value === "learning" ||
+    value === "review" ||
+    value === "mastered"
+    ? value
+    : fallback;
+}
+
+export function quizRowToDomain(row: Record<string, unknown>): unknown {
   const item: Record<string, unknown> = {
     id: row.id,
     subject: row.subject ?? "",
@@ -22,6 +52,20 @@ function toDomain(row: Record<string, unknown>): unknown {
     correctIndex: row.correct_index,
     explanation: row.explanation ?? "",
     kind: row.kind ?? "single",
+    documentId: row.document_id ?? null,
+    source: row.source ?? "manual",
+    sourceRefs: Array.isArray(row.source_refs)
+      ? row.source_refs.filter(
+          (ref): ref is string => typeof ref === "string",
+        )
+      : [],
+    lastReviewedAt: row.last_reviewed_at ?? null,
+    nextReviewAt: row.next_review_at ?? null,
+    reviewCount: countOr(row.review_count, 0),
+    successCount: countOr(row.success_count, 0),
+    streak: countOr(row.streak, 0),
+    difficulty: difficultyOr(row.difficulty, 3),
+    reviewStatus: reviewStatusOr(row.review_status, "new"),
   };
 
   if (Array.isArray(row.correct_indices)) {
@@ -36,14 +80,15 @@ function toDomain(row: Record<string, unknown>): unknown {
 }
 
 /**
- * A referenced exam/topic must exist AND belong to the same user,
- * otherwise the write is rejected (never 404-oracle the id: a missing
- * row and a foreign row both fail validation the same way).
+ * A referenced exam/topic/document must exist AND belong to the same
+ * user, otherwise the write is rejected (never 404-oracle the id: a
+ * missing row and a foreign row both fail validation the same way).
  */
 async function referencesOwned(
   db: Parameters<CrudConfig["checkCreate"]>[0],
   examId: string | null,
   topicId: string | null,
+  documentId: string | null | undefined,
 ): Promise<boolean> {
   for (const [id, section] of [
     [examId, "exams"],
@@ -62,10 +107,22 @@ async function referencesOwned(
     }
   }
 
+  if (documentId !== undefined && documentId !== null) {
+    const doc = await dbGetOne<Record<string, unknown>>(
+      db,
+      "study_documents",
+      documentId,
+    );
+
+    if (doc === null) {
+      return false;
+    }
+  }
+
   return true;
 }
 
-function toDbRow(item: QuizQuestion): Record<string, unknown> {
+export function quizToDbRow(item: QuizQuestion): Record<string, unknown> {
   return {
     id: item.id,
     subject: item.subject,
@@ -78,13 +135,23 @@ function toDbRow(item: QuizQuestion): Record<string, unknown> {
     kind: item.kind ?? "single",
     correct_indices: item.correctIndices ?? null,
     grading_criteria: item.gradingCriteria ?? "",
+    document_id: item.documentId ?? null,
+    source: item.source ?? "manual",
+    source_refs: item.sourceRefs ?? [],
+    last_reviewed_at: item.lastReviewedAt ?? null,
+    next_review_at: item.nextReviewAt ?? null,
+    review_count: item.reviewCount ?? 0,
+    success_count: item.successCount ?? 0,
+    streak: item.streak ?? 0,
+    difficulty: item.difficulty ?? 3,
+    review_status: item.reviewStatus ?? "new",
   };
 }
 
 export const quizConfig: CrudConfig = {
   table: "quiz_questions",
   order: "created_at.asc",
-  toDomain,
+  toDomain: quizRowToDomain,
   isList: isQuizQuestionList,
   checkCreate: async (db, body) => {
     if (!isQuizQuestion(body) || requireId(body) === null) {
@@ -93,11 +160,18 @@ export const quizConfig: CrudConfig = {
 
     const item = body as QuizQuestion;
 
-    if (!(await referencesOwned(db, item.examId, item.topicId))) {
-      return { message: "Verknüpfte Prüfung oder Thema existiert nicht." };
+    if (
+      !(await referencesOwned(
+        db,
+        item.examId,
+        item.topicId,
+        item.documentId,
+      ))
+    ) {
+      return { message: "Verknüpfte Prüfung, Thema oder Dokument existiert nicht." };
     }
 
-    return { row: toDbRow(item) };
+    return { row: quizToDbRow(item) };
   },
   checkUpdate: async (db, patch, existing): Promise<CheckResult> => {
     const picked = pickPatch(patch, [
@@ -111,6 +185,16 @@ export const quizConfig: CrudConfig = {
       "kind",
       "correctIndices",
       "gradingCriteria",
+      "documentId",
+      "source",
+      "sourceRefs",
+      "lastReviewedAt",
+      "nextReviewAt",
+      "reviewCount",
+      "successCount",
+      "streak",
+      "difficulty",
+      "reviewStatus",
     ]);
 
     if (picked === null) {
@@ -128,11 +212,18 @@ export const quizConfig: CrudConfig = {
 
     const item = merged as unknown as QuizQuestion;
 
-    if (!(await referencesOwned(db, item.examId, item.topicId))) {
-      return { message: "Verknüpfte Prüfung oder Thema existiert nicht." };
+    if (
+      !(await referencesOwned(
+        db,
+        item.examId,
+        item.topicId,
+        item.documentId,
+      ))
+    ) {
+      return { message: "Verknüpfte Prüfung, Thema oder Dokument existiert nicht." };
     }
 
-    const row = toDbRow(item);
+    const row = quizToDbRow(item);
     delete row.id;
 
     return { row };

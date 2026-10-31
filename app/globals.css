@@ -25,6 +25,13 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+/* Stable scrollbar gutter: opening panels, banners, or modals must
+   never shift the page horizontally when the scrollbar appears or
+   disappears. No-op on overlay scrollbars (mobile). */
+html {
+  scrollbar-gutter: stable;
+}
+
 /* ------------------------------------------------------------------ */
 /* J.A.R.V.I.S. motion system (CSS-only, reduced-motion aware).        */
 /* Entry animations are reserved for top-level dashboard blocks with    */

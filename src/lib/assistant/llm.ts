@@ -22,6 +22,7 @@ export type ProviderCode =
   | "model-not-found"
   | "upstream"
   | "malformed"
+  | "truncated"
   | "invalid-plan"
   | "cancelled";
 
@@ -139,6 +140,15 @@ export type LlmChatOptions = {
 export type LlmChatResult = {
   content: string;
   model: string;
+  /** Ollama completion status ("stop" when the answer finished). */
+  doneReason: string | null;
+  /** Generated tokens, when reported. */
+  evalCount: number | null;
+  /**
+   * Length of the thinking trace in characters — never the trace
+   * itself, which may reason over private context.
+   */
+  thinkingChars: number;
 };
 
 export const LLM_NOT_CONFIGURED_MESSAGE =
@@ -294,16 +304,35 @@ export async function chatWithOllama(
       );
     }
 
-    let content: string;
+    let result: LlmChatResult;
 
     try {
       const payload = (await res.json()) as {
-        message?: { content?: unknown };
+        message?: { content?: unknown; thinking?: unknown };
+        done_reason?: unknown;
+        eval_count?: unknown;
+        model?: unknown;
       };
-      content =
-        typeof payload.message?.content === "string"
-          ? payload.message.content
-          : "";
+      const message = payload.message ?? {};
+      result = {
+        content:
+          typeof message.content === "string" ? message.content : "",
+        model:
+          typeof payload.model === "string" && payload.model !== ""
+            ? payload.model
+            : model,
+        doneReason:
+          typeof payload.done_reason === "string"
+            ? payload.done_reason
+            : null,
+        evalCount:
+          typeof payload.eval_count === "number" &&
+          Number.isInteger(payload.eval_count)
+            ? payload.eval_count
+            : null,
+        thinkingChars:
+          typeof message.thinking === "string" ? message.thinking.length : 0,
+      };
     } catch {
       throw new ProviderError(
         "malformed",
@@ -311,7 +340,7 @@ export async function chatWithOllama(
       );
     }
 
-    return { content, model };
+    return result;
   }
 }
 

@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Check, Repeat } from "lucide-react";
 import { useToday } from "@/src/hooks/useToday";
 import { formatDayShort } from "@/src/lib/briefing";
@@ -9,10 +10,20 @@ import {
   type ReviewInfo,
 } from "@/src/lib/revision";
 import type { Entry } from "@/src/lib/study";
+import type { QuizQuestion } from "@/src/lib/quiz";
+import {
+  getQuizReviewInfo,
+  type QuizReviewPatch,
+} from "@/src/lib/quizReview";
+import { QuestionReviewer } from "@/src/components/study/QuestionReviewer";
 
 type TopicRow = { topic: Entry; info: ReviewInfo };
 
-function DueBadge({ info }: { info: ReviewInfo }) {
+function DueBadge({
+  info,
+}: {
+  info: Pick<ReviewInfo, "status" | "daysLeft" | "dueISO">;
+}) {
   if (info.status === "overdue") {
     const text =
       info.daysLeft === -1
@@ -44,12 +55,40 @@ function DueBadge({ info }: { info: ReviewInfo }) {
 export function RevisionPanel({
   topics,
   onReview,
+  questions = [],
+  onReviewQuestion,
 }: {
   topics: Entry[];
   onReview: (id: string, todayISO: string) => void;
+  questions?: QuizQuestion[];
+  onReviewQuestion?: (
+    id: string,
+    patch: QuizReviewPatch,
+  ) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const today = useToday();
+  const [expandedQuestionId, setExpandedQuestionId] = useState<string | null>(
+    null,
+  );
   const openTopics = topics.filter((topic) => topic.done !== true);
+  const dueQuestions =
+    today === null
+      ? []
+      : questions
+          .map((question) => ({
+            question,
+            info: getQuizReviewInfo(question, today),
+          }))
+          .filter((row) => row.info.status !== "later")
+          .sort((a, b) => a.info.dueISO.localeCompare(b.info.dueISO));
+  const laterQuestionCount = questions.length - dueQuestions.length;
+  const expandedQuestion =
+    expandedQuestionId === null
+      ? null
+      : (questions.find((item) => item.id === expandedQuestionId) ?? null);
+  const expandedIsDue =
+    expandedQuestion !== null &&
+    dueQuestions.some((row) => row.question.id === expandedQuestion.id);
   const rows: TopicRow[] =
     today === null
       ? []
@@ -64,6 +103,72 @@ export function RevisionPanel({
   const later = rows
     .filter((row) => row.info.status === "later")
     .sort((a, b) => a.info.dueISO.localeCompare(b.info.dueISO));
+
+  function renderQuestionRow({
+    question,
+    info,
+  }: {
+    question: QuizQuestion;
+    info: Pick<ReviewInfo, "status" | "daysLeft" | "dueISO">;
+  }) {
+    const expanded = expandedQuestionId === question.id;
+    const persistReview = onReviewQuestion;
+    const firstRef = question.sourceRefs?.[0];
+
+    return (
+      <li
+        key={question.id}
+        className="rounded-2xl border border-white/[0.05] bg-white/[0.02] p-4"
+      >
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="min-w-0 flex-1 basis-48">
+            <p className="line-clamp-2 text-sm text-slate-200">
+              {question.question}
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <span className="rounded-full bg-cyan-300/[0.08] px-2 py-1 text-[10px] text-cyan-200">
+                {question.subject === "" ? "Ohne Fach" : question.subject}
+              </span>
+              {question.source === "ai" && (
+                <span className="rounded-full bg-amber-400/10 px-2 py-1 text-[10px] text-amber-300">
+                  KI-generiert
+                </span>
+              )}
+              {firstRef !== undefined && firstRef !== "" && (
+                <span className="rounded-full bg-white/[0.05] px-2 py-1 text-[10px] text-slate-400">
+                  {firstRef}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <DueBadge info={info} />
+
+          {persistReview !== undefined && (
+            <button
+              onClick={() =>
+                setExpandedQuestionId(expanded ? null : question.id)
+              }
+              aria-expanded={expanded}
+              className="flex shrink-0 items-center gap-1.5 rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-300 transition hover:border-cyan-300/30 hover:text-cyan-200"
+            >
+              {expanded ? "Schließen" : "Beantworten"}
+            </button>
+          )}
+        </div>
+
+        {expanded && persistReview !== undefined && (
+          <div className="mt-3">
+            <QuestionReviewer
+              question={question}
+              onRate={(patch) => persistReview(question.id, patch)}
+              onClose={() => setExpandedQuestionId(null)}
+            />
+          </div>
+        )}
+      </li>
+    );
+  }
 
   function renderRow({ topic, info }: TopicRow) {
     return (
@@ -179,6 +284,55 @@ export function RevisionPanel({
             )}
           </div>
         )}
+      </div>
+
+      <div className="mt-6 border-t border-white/[0.06] pt-5">
+        <h3 className="text-sm font-semibold text-slate-200">
+          Übungsfragen zur Wiederholung
+        </h3>
+        <p className="mt-1 text-xs leading-5 text-slate-500">
+          Fällige Fragen beantworten, Schwierigkeit einschätzen — die
+          nächste Wiederholung plant sich danach (1 · 3 · 7 · 14 · 30
+          Tage).
+        </p>
+
+        <div className="mt-4">
+          {today === null ? (
+            <p className="text-sm text-slate-500">Wird geladen …</p>
+          ) : questions.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-white/10 p-5 text-center text-sm text-slate-500">
+              Noch keine Übungsfragen. Generiere sie aus einem Dokument
+              oder lege sie unten manuell an.
+            </div>
+          ) : dueQuestions.length === 0 &&
+            (expandedQuestion === null || expandedIsDue) ? (
+            <p className="rounded-2xl border border-emerald-400/25 bg-emerald-400/5 p-3 text-sm text-emerald-200">
+              Alle Fragen im Plan
+              {laterQuestionCount > 0
+                ? ` — ${laterQuestionCount} später fällig`
+                : ""}
+              .
+            </p>
+          ) : (
+            <div>
+              <ul className="space-y-2">
+                {dueQuestions.map((row) => renderQuestionRow(row))}
+                {expandedQuestion !== null &&
+                  !expandedIsDue &&
+                  today !== null &&
+                  renderQuestionRow({
+                    question: expandedQuestion,
+                    info: getQuizReviewInfo(expandedQuestion, today),
+                  })}
+              </ul>
+              {laterQuestionCount > 0 && (
+                <p className="mt-2 text-xs text-slate-500">
+                  {laterQuestionCount} weitere später fällig.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </section>
   );

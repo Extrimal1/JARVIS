@@ -86,6 +86,10 @@ function rowToMeta(row: Record<string, unknown>): unknown {
     description: row.description ?? "",
     uploadedAt: row.uploaded_at,
     extractionStatus: row.extraction_status ?? "not_processed",
+    pageCount:
+      typeof row.page_count === "number" && Number.isInteger(row.page_count)
+        ? row.page_count
+        : null,
   };
 }
 

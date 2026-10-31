@@ -142,6 +142,45 @@ describe("chatWithOllama", () => {
     assert.deepEqual(body.messages, [{ role: "user", content: "Hallo" }]);
   });
 
+  it("always serializes think:false unless explicitly enabled", async () => {
+    process.env.OLLAMA_MODEL = "qwen3.5:4b";
+    mockFetchJson(CHAT_OK);
+
+    // No options at all, like the question-generation flow.
+    await chatWithOllama(USER_MESSAGE);
+
+    assert.equal(lastBody().think, false);
+  });
+
+  it("returns completion metadata and thinking length", async () => {
+    process.env.OLLAMA_MODEL = "qwen3.5:4b";
+    mockFetchJson({
+      model: "qwen3.5:4b",
+      message: { content: "[]", thinking: "x".repeat(500) },
+      done: true,
+      done_reason: "stop",
+      eval_count: 12,
+    });
+
+    const result = await chatWithOllama(USER_MESSAGE);
+
+    assert.equal(result.content, "[]");
+    assert.equal(result.doneReason, "stop");
+    assert.equal(result.evalCount, 12);
+    assert.equal(result.thinkingChars, 500);
+  });
+
+  it("defaults missing metadata honestly", async () => {
+    process.env.OLLAMA_MODEL = "qwen3.5:4b";
+    mockFetchJson(CHAT_OK);
+
+    const result = await chatWithOllama(USER_MESSAGE);
+
+    assert.equal(result.doneReason, null);
+    assert.equal(result.evalCount, null);
+    assert.equal(result.thinkingChars, 0);
+  });
+
   it("omits format for free text and honors context env knobs", async () => {
     process.env.OLLAMA_MODEL = "qwen3.5:4b";
     process.env.OLLAMA_NUM_PREDICT = "512";

@@ -51,6 +51,11 @@ export type ExtractedBlock = {
 export type ExtractedDocument = {
   blocks: ExtractedBlock[];
   warnings: string[];
+  /**
+   * Total PDF pages / PPTX slides found (including textless ones);
+   * null when the kind has no page concept (DOCX, TXT, MD).
+   */
+  pageCount: number | null;
 };
 
 export const EXTRACTABLE_KINDS = ["pdf", "docx", "pptx", "txt", "md"] as const;
@@ -554,6 +559,7 @@ function slideNumber(name: string): number | null {
 async function extractPdfBlocks(bytes: Uint8Array): Promise<{
   blocks: ExtractedBlock[];
   warnings: string[];
+  pageCount: number;
 }> {
   let parsed;
 
@@ -599,7 +605,7 @@ async function extractPdfBlocks(bytes: Uint8Array): Promise<{
     );
   }
 
-  return { blocks, warnings };
+  return { blocks, warnings, pageCount: parsed.pageCount };
 }
 
 async function extractDocxBlocks(
@@ -646,7 +652,7 @@ async function extractDocxBlocks(
     }
   }
 
-  return { blocks, warnings };
+  return { blocks, warnings, pageCount: null };
 }
 
 async function extractPptxBlocks(
@@ -680,7 +686,16 @@ async function extractPptxBlocks(
     }
   }
 
-  return { blocks, warnings: [] };
+  const warnings: string[] = [];
+  const empty = names.length - blocks.length;
+
+  if (empty > 0) {
+    warnings.push(
+      `${empty} von ${names.length} Folien enthalten keinen lesbaren Text.`,
+    );
+  }
+
+  return { blocks, warnings, pageCount: names.length };
 }
 
 function extractTextBlocks(bytes: Uint8Array): ExtractedDocument {
@@ -712,7 +727,7 @@ function extractTextBlocks(bytes: Uint8Array): ExtractedDocument {
     }
   }
 
-  return { blocks, warnings };
+  return { blocks, warnings, pageCount: null };
 }
 
 // ------------------------------------------------------------------ entry
@@ -771,7 +786,11 @@ export async function extractDocument(
     );
   }
 
-  return { blocks: nonEmpty, warnings: result.warnings };
+  return {
+    blocks: nonEmpty,
+    warnings: result.warnings,
+    pageCount: result.pageCount,
+  };
 }
 
 /** Full plain text (block order); used for previews and text stores. */

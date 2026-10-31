@@ -73,6 +73,8 @@ export type ProcessResponse = {
   blocks: number;
   warnings: string[];
   message: string;
+  /** Total PDF pages / PPTX slides; absent when unknown or inapplicable. */
+  pageCount?: number | null;
 };
 
 const PROCESS_STATUSES: ExtractionStatus[] = [
@@ -95,7 +97,10 @@ export function isProcessResponse(value: unknown): value is ProcessResponse {
     typeof record.blocks === "number" &&
     Array.isArray(record.warnings) &&
     record.warnings.every((warning) => typeof warning === "string") &&
-    typeof record.message === "string"
+    typeof record.message === "string" &&
+    (record.pageCount === undefined ||
+      record.pageCount === null ||
+      typeof record.pageCount === "number")
   );
 }
 
@@ -142,6 +147,368 @@ export function isExplainResponse(value: unknown): value is ExplainResponse {
     Array.isArray(record.refsUsed) &&
     record.refsUsed.every((ref) => typeof ref === "string") &&
     typeof record.insufficient === "boolean"
+  );
+}
+
+export type GeneratedQuestionDto = {
+  question: string;
+  options: string[];
+  correctIndex: number;
+  explanation: string;
+  kind: "single" | "multiple" | "free";
+  correctIndices?: number[];
+  gradingCriteria?: string;
+  /** Resolved page/section labels (never raw [Qn] markers). */
+  refs: string[];
+};
+
+export function isGeneratedQuestionDto(
+  value: unknown,
+): value is GeneratedQuestionDto {
+  if (typeof value !== "object" || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+
+  return (
+    typeof record.question === "string" &&
+    Array.isArray(record.options) &&
+    record.options.every((option) => typeof option === "string") &&
+    typeof record.correctIndex === "number" &&
+    typeof record.explanation === "string" &&
+    (record.kind === "single" ||
+      record.kind === "multiple" ||
+      record.kind === "free") &&
+    (record.correctIndices === undefined ||
+      (Array.isArray(record.correctIndices) &&
+        record.correctIndices.every(
+          (index): index is number => typeof index === "number",
+        ))) &&
+    (record.gradingCriteria === undefined ||
+      typeof record.gradingCriteria === "string") &&
+    Array.isArray(record.refs) &&
+    record.refs.every((ref) => typeof ref === "string")
+  );
+}
+
+/** Which document slice this batch drew on. */
+export type QuestionWindow = {
+  labels: string[];
+  poolSize: number;
+  truncated: boolean;
+};
+
+export function isQuestionWindow(value: unknown): value is QuestionWindow {
+  if (typeof value !== "object" || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+
+  return (
+    Array.isArray(record.labels) &&
+    record.labels.every((label) => typeof label === "string") &&
+    typeof record.poolSize === "number" &&
+    typeof record.truncated === "boolean"
+  );
+}
+
+/** Coverage before this batch (callers re-derive after saving). */
+export type QuestionCoverage = {
+  usableUnits: number;
+  coveredUnits: number;
+  percent: number;
+};
+
+export function isQuestionCoverage(
+  value: unknown,
+): value is QuestionCoverage {
+  if (typeof value !== "object" || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+
+  return (
+    typeof record.usableUnits === "number" &&
+    typeof record.coveredUnits === "number" &&
+    typeof record.percent === "number"
+  );
+}
+
+export const EMPTY_QUESTION_WINDOW: QuestionWindow = {
+  labels: [],
+  poolSize: 0,
+  truncated: false,
+};
+
+// ------------------------------------------------- document summaries
+
+/** One planned summary span (contiguous units, stable key). */
+export type SummarySpanPlan = {
+  key: string;
+  label: string;
+  /** Distributed processing position (0-based). */
+  order: number;
+};
+
+export function isSummarySpanPlan(value: unknown): value is SummarySpanPlan {
+  if (typeof value !== "object" || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+
+  return (
+    typeof record.key === "string" &&
+    typeof record.label === "string" &&
+    typeof record.order === "number"
+  );
+}
+
+/** One persisted per-span summary. */
+export type SummarySpanResult = {
+  key: string;
+  label: string;
+  text: string;
+  refs: string[];
+  completedAt: string;
+};
+
+export function isSummarySpanResult(
+  value: unknown,
+): value is SummarySpanResult {
+  if (typeof value !== "object" || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+
+  return (
+    typeof record.key === "string" &&
+    typeof record.label === "string" &&
+    typeof record.text === "string" &&
+    Array.isArray(record.refs) &&
+    record.refs.every((ref) => typeof ref === "string") &&
+    typeof record.completedAt === "string"
+  );
+}
+
+export type SummaryStatus = "none" | "partial" | "complete";
+
+/**
+ * Draft + active summary state for one document. The active
+ * summary stays readable and untouched while a draft generation
+ * (its own generation_id + spans) runs; promotion replaces the
+ * active text only after a successful complete synthesis.
+ */
+export type DocumentSummary = {
+  documentId: string;
+  status: SummaryStatus;
+  active: {
+    text: string;
+    refs: string[];
+    completedAt: string;
+  } | null;
+  draft: {
+    generationId: string;
+    plannedSpans: SummarySpanPlan[];
+    spans: SummarySpanResult[];
+    preview: { text: string; refs: string[] } | null;
+    startedAt: string;
+  } | null;
+};
+
+export function isDocumentSummary(value: unknown): value is DocumentSummary {
+  if (typeof value !== "object" || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+  const active = record.active as Record<string, unknown> | null;
+  const draft = record.draft as Record<string, unknown> | null;
+
+  return (
+    typeof record.documentId === "string" &&
+    (record.status === "none" ||
+      record.status === "partial" ||
+      record.status === "complete") &&
+    (active === null ||
+      (typeof active === "object" &&
+        typeof active.text === "string" &&
+        Array.isArray(active.refs) &&
+        active.refs.every((ref) => typeof ref === "string") &&
+        typeof active.completedAt === "string")) &&
+    (draft === null ||
+      (typeof draft === "object" &&
+        typeof draft.generationId === "string" &&
+        Array.isArray(draft.plannedSpans) &&
+        draft.plannedSpans.every(isSummarySpanPlan) &&
+        Array.isArray(draft.spans) &&
+        draft.spans.every(isSummarySpanResult) &&
+        (draft.preview === null ||
+          (typeof draft.preview === "object" &&
+            typeof (draft.preview as Record<string, unknown>).text ===
+              "string" &&
+            Array.isArray(
+              (draft.preview as Record<string, unknown>).refs,
+            ))) &&
+        typeof draft.startedAt === "string"))
+  );
+}
+
+/** Persisted summary record (CRUD domain shape). */
+export type SummaryRecord = DocumentSummary & { id: string };
+
+export function isSummaryRecord(value: unknown): value is SummaryRecord {
+  if (typeof value !== "object" || value === null) return false;
+
+  return (
+    typeof (value as Record<string, unknown>).id === "string" &&
+    isDocumentSummary(value)
+  );
+}
+
+export function isSummaryRecordList(value: unknown): value is SummaryRecord[] {
+  return Array.isArray(value) && value.every(isSummaryRecord);
+}
+
+/** One generated span batch with store-validated progress. */
+export type SummarizeBatchResponse = {
+  documentId: string;
+  generationId: string;
+  span: { key: string; label: string; index: number; total: number };
+  text: string;
+  refs: string[];
+  processedUnits: number;
+  usableUnits: number;
+  percent: number;
+  /** True when every planned span already persisted (nothing to do). */
+  done: boolean;
+};
+
+export function isSummarizeBatchResponse(
+  value: unknown,
+): value is SummarizeBatchResponse {
+  if (typeof value !== "object" || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+  const span = record.span as Record<string, unknown> | undefined;
+
+  return (
+    typeof record.documentId === "string" &&
+    typeof record.generationId === "string" &&
+    typeof span === "object" &&
+    span !== null &&
+    typeof span.key === "string" &&
+    typeof span.label === "string" &&
+    typeof span.index === "number" &&
+    typeof span.total === "number" &&
+    typeof record.text === "string" &&
+    Array.isArray(record.refs) &&
+    record.refs.every((ref) => typeof ref === "string") &&
+    typeof record.processedUnits === "number" &&
+    typeof record.usableUnits === "number" &&
+    typeof record.percent === "number" &&
+    typeof record.done === "boolean"
+  );
+}
+
+/** Final (or partial-preview) synthesis over persisted spans. */
+export type SynthesizeResponse = {
+  documentId: string;
+  generationId: string;
+  text: string;
+  refs: string[];
+  /** True only when every usable unit was synthesized. */
+  complete: boolean;
+  levels: number;
+};
+
+export function isSynthesizeResponse(
+  value: unknown,
+): value is SynthesizeResponse {
+  if (typeof value !== "object" || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+
+  return (
+    typeof record.documentId === "string" &&
+    typeof record.generationId === "string" &&
+    typeof record.text === "string" &&
+    Array.isArray(record.refs) &&
+    record.refs.every((ref) => typeof ref === "string") &&
+    typeof record.complete === "boolean" &&
+    typeof record.levels === "number"
+  );
+}
+
+/** Per-document coverage snapshot for the Study UI. */
+export type DocumentCoverage = {
+  documentId: string;
+  /** Total PDF pages / PPTX slides; null when unknown or inapplicable. */
+  totalPages: number | null;
+  usableUnits: number;
+  coveredUnits: number;
+  percent: number;
+  questionCount: number;
+  /** Adaptive question target for the whole document. */
+  target: number;
+};
+
+export function isDocumentCoverage(
+  value: unknown,
+): value is DocumentCoverage {
+  if (typeof value !== "object" || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+
+  return (
+    typeof record.documentId === "string" &&
+    (record.totalPages === null || typeof record.totalPages === "number") &&
+    typeof record.usableUnits === "number" &&
+    typeof record.coveredUnits === "number" &&
+    typeof record.percent === "number" &&
+    typeof record.questionCount === "number" &&
+    typeof record.target === "number"
+  );
+}
+
+export const EMPTY_QUESTION_COVERAGE: QuestionCoverage = {
+  usableUnits: 0,
+  coveredUnits: 0,
+  percent: 0,
+};
+
+export type QuestionsResponse = {
+  questions: GeneratedQuestionDto[];
+  documentId: string;
+  documentName: string;
+  subject: string | null;
+  refsUsed: string[];
+  truncated: boolean;
+  chunkCount: number;
+  /** True when no usable chunks existed (no LLM call happened). */
+  insufficient: boolean;
+  /** Model items dropped as invalid (never repaired heuristically). */
+  droppedInvalid: number;
+  /** True when fewer valid questions came back than requested. */
+  partial: boolean;
+  window: QuestionWindow;
+  coverage: QuestionCoverage;
+};
+
+export function isQuestionsResponse(
+  value: unknown,
+): value is QuestionsResponse {
+  if (typeof value !== "object" || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+
+  return (
+    Array.isArray(record.questions) &&
+    record.questions.every(isGeneratedQuestionDto) &&
+    typeof record.documentId === "string" &&
+    typeof record.documentName === "string" &&
+    (record.subject === null || typeof record.subject === "string") &&
+    Array.isArray(record.refsUsed) &&
+    record.refsUsed.every((ref) => typeof ref === "string") &&
+    typeof record.truncated === "boolean" &&
+    typeof record.chunkCount === "number" &&
+    typeof record.insufficient === "boolean" &&
+    typeof record.droppedInvalid === "number" &&
+    typeof record.partial === "boolean" &&
+    isQuestionWindow(record.window) &&
+    isQuestionCoverage(record.coverage)
   );
 }
 

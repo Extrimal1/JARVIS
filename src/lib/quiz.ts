@@ -1,9 +1,19 @@
 /**
- * Manual practice questions. Created by the user only — no AI is
- * involved in this phase. Future AI-generated questions must be
- * labelled explicitly and never mixed in silently.
+ * Practice questions. Manual questions are created by the user;
+ * AI-generated questions come from grounded document generation
+ * and MUST carry `source: "ai"` — never mixed in silently.
  */
 export type QuestionKind = "single" | "multiple" | "free";
+
+/** Origin label: absent means "manual" (all pre-AI records). */
+export type QuestionSource = "manual" | "ai";
+
+/**
+ * Spaced-repetition state per question. Absent means "new".
+ * "new" → reviewed at least once → "learning" → streak ≥ 2 →
+ * "review" → streak ≥ 4 → "mastered".
+ */
+export type QuizReviewStatus = "new" | "learning" | "review" | "mastered";
 
 export type QuizQuestion = {
   id: string;
@@ -22,6 +32,26 @@ export type QuizQuestion = {
   correctIndices?: number[];
   /** Used when kind is "free". */
   gradingCriteria?: string;
+  /** Source document id for AI-generated questions. */
+  documentId?: string | null;
+  /** Absent means "manual" (all pre-AI records). */
+  source?: QuestionSource;
+  /** Page/section labels the question was grounded in. */
+  sourceRefs?: string[];
+  /** Last review as YYYY-MM-DD (absent/null = never reviewed). */
+  lastReviewedAt?: string | null;
+  /** Next due date as YYYY-MM-DD (absent/null = due now). */
+  nextReviewAt?: string | null;
+  /** Total completed reviews. */
+  reviewCount?: number;
+  /** Total successful reviews (cumulative, never reset). */
+  successCount?: number;
+  /** Consecutive successful reviews (reset on failure). */
+  streak?: number;
+  /** Last self-reported difficulty, 1 (again) … 5 (easy). */
+  difficulty?: number;
+  /** Absent means "new" (all pre-AI records). */
+  reviewStatus?: QuizReviewStatus;
 };
 
 export const QUIZ_STORAGE_KEY = "jarvis-quiz";
@@ -81,7 +111,42 @@ export function isQuizQuestion(value: unknown): value is QuizQuestion {
             typeof index === "number" && Number.isInteger(index),
         ))) &&
     (item.gradingCriteria === undefined ||
-      typeof item.gradingCriteria === "string")
+      typeof item.gradingCriteria === "string") &&
+    (item.documentId === undefined ||
+      item.documentId === null ||
+      typeof item.documentId === "string") &&
+    (item.source === undefined ||
+      item.source === "manual" ||
+      item.source === "ai") &&
+    (item.sourceRefs === undefined || isStringList(item.sourceRefs)) &&
+    (item.lastReviewedAt === undefined ||
+      item.lastReviewedAt === null ||
+      typeof item.lastReviewedAt === "string") &&
+    (item.nextReviewAt === undefined ||
+      item.nextReviewAt === null ||
+      typeof item.nextReviewAt === "string") &&
+    (item.reviewCount === undefined ||
+      (typeof item.reviewCount === "number" &&
+        Number.isInteger(item.reviewCount) &&
+        item.reviewCount >= 0)) &&
+    (item.successCount === undefined ||
+      (typeof item.successCount === "number" &&
+        Number.isInteger(item.successCount) &&
+        item.successCount >= 0)) &&
+    (item.streak === undefined ||
+      (typeof item.streak === "number" &&
+        Number.isInteger(item.streak) &&
+        item.streak >= 0)) &&
+    (item.difficulty === undefined ||
+      (typeof item.difficulty === "number" &&
+        Number.isInteger(item.difficulty) &&
+        item.difficulty >= 1 &&
+        item.difficulty <= 5)) &&
+    (item.reviewStatus === undefined ||
+      item.reviewStatus === "new" ||
+      item.reviewStatus === "learning" ||
+      item.reviewStatus === "review" ||
+      item.reviewStatus === "mastered")
   );
 }
 

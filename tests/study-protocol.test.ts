@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   excerptOf,
+  isDocumentCoverage,
   isExplainResponse,
   isProcessResponse,
   isRetrieveResponse,
@@ -117,6 +118,28 @@ describe("protocol guards", () => {
       false,
     );
     assert.equal(
+      isProcessResponse({
+        status: "completed",
+        chunks: 4,
+        blocks: 3,
+        warnings: [],
+        message: "ok",
+        pageCount: 120,
+      }),
+      true,
+    );
+    assert.equal(
+      isProcessResponse({
+        status: "completed",
+        chunks: 4,
+        blocks: 3,
+        warnings: [],
+        message: "ok",
+        pageCount: "120",
+      }),
+      false,
+    );
+    assert.equal(
       isSummarizeResponse({
         summary: "s",
         documentName: "d",
@@ -127,6 +150,46 @@ describe("protocol guards", () => {
       true,
     );
     assert.equal(isSummarizeResponse({ summary: "s" }), false);
+    assert.equal(
+      isDocumentCoverage({
+        documentId: "doc-1",
+        totalPages: 8,
+        usableUnits: 4,
+        coveredUnits: 3,
+        percent: 75,
+        questionCount: 3,
+        target: 4,
+      }),
+      true,
+    );
+    assert.equal(
+      isDocumentCoverage({
+        documentId: "doc-1",
+        totalPages: null,
+        usableUnits: 0,
+        coveredUnits: 0,
+        percent: 0,
+        questionCount: 0,
+        target: 0,
+      }),
+      true,
+    );
+    assert.equal(
+      isDocumentCoverage({ documentId: "doc-1", percent: 50 }),
+      false,
+    );
+    assert.equal(
+      isDocumentCoverage({
+        documentId: "doc-1",
+        totalPages: null,
+        usableUnits: 0,
+        coveredUnits: 0,
+        percent: 0,
+        questionCount: 0,
+        target: "0",
+      }),
+      false,
+    );
     assert.equal(
       isExplainResponse({
         answer: "a",

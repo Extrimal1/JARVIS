@@ -10,13 +10,22 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   explainStudyDoc,
+  generationLockKey,
+  getStudyCoverage,
   processStudyDoc,
+  releaseGenerationLock,
   retrieveStudyChunks,
+  summarizeNextSpan,
   summarizeStudyDoc,
+  synthesizeSummary,
+  tryAcquireGenerationLock,
   validExplainInput,
   validRetrieveInput,
   validSummarizeInput,
+  validSummaryBatchInput,
+  validSynthesizeInput,
 } from "@/src/lib/api/modules/studyIntel";
+import { ProviderError } from "@/src/lib/assistant/llm";
 import { dbFor } from "@/src/lib/supabase/db";
 
 const DB = dbFor(
@@ -431,5 +440,734 @@ describe("summarizeStudyDoc", () => {
 
     assert.match(outcome.response.summary, /noch nicht verarbeitet/);
     assert.ok(hits.every((hit) => !hit.url.includes("11434")));
+  });
+});
+
+describe("getStudyCoverage", () => {
+  const DOC_ROW = {
+    id: "doc-1",
+    name: "Vorlesung.pptx",
+    extraction_status: "completed",
+    page_count: 8,
+  };
+  const CHUNK_ROWS = [1, 2, 3, 4].map((slide) => ({
+    id: `s${slide}`,
+    document_id: "doc-1",
+    chunk_index: slide - 1,
+    content: `Inhalt Folie ${slide}.`,
+    source_refs: [{ kind: "slide", slide }],
+  }));
+
+  it("derives usable/covered units from chunks and question labels", async () => {
+    onRest("GET", "study_documents", () => json([DOC_ROW]));
+    onRest("GET", "retrieval_chunks", () => json(CHUNK_ROWS));
+    onRest("GET", "quiz_questions", () =>
+      json([
+        { id: "q1", source_refs: ["Folie 1"] },
+        { id: "q2", source_refs: ["Folien 3–4"] },
+        { id: "q3", source_refs: [] },
+      ]),
+    );
+
+    const outcome = await getStudyCoverage(DB, "doc-1");
+
+    assert.equal(outcome.ok, true);
+
+    if (!outcome.ok) return;
+
+    assert.deepEqual(outcome.coverage, {
+      documentId: "doc-1",
+      totalPages: 8,
+      usableUnits: 4,
+      coveredUnits: 3,
+      percent: 75,
+      questionCount: 3,
+      target: 4,
+    });
+    assert.ok(hits.every((hit) => !hit.url.includes("11434")));
+  });
+
+  it("reports honest zeros when nothing usable exists", async () => {
+    onRest("GET", "study_documents", () =>
+      json([{ ...DOC_ROW, page_count: null }]),
+    );
+    onRest("GET", "retrieval_chunks", () => json([]));
+    onRest("GET", "quiz_questions", () =>
+      json([{ id: "q1", source_refs: ["Folie 1"] }]),
+    );
+
+    const outcome = await getStudyCoverage(DB, "doc-1");
+
+    assert.equal(outcome.ok, true);
+
+    if (!outcome.ok) return;
+
+    assert.deepEqual(outcome.coverage, {
+      documentId: "doc-1",
+      totalPages: null,
+      usableUnits: 0,
+      coveredUnits: 0,
+      percent: 0,
+      questionCount: 1,
+      target: 0,
+    });
+  });
+
+  it("returns 404 for unknown documents", async () => {
+    onRest("GET", "study_documents", () => json([]));
+
+    const outcome = await getStudyCoverage(DB, "missing");
+
+    assert.deepEqual(outcome, {
+      ok: false,
+      http: 404,
+      message: "Dokument nicht gefunden.",
+    });
+  });
+});
+
+describe("summary validators", () => {
+  it("validates batch and synthesize input", () => {
+    assert.deepEqual(
+      validSummaryBatchInput({ documentId: "d", locale: "de" }),
+      { documentId: "d", locale: "de", generationId: null },
+    );
+    assert.deepEqual(
+      validSummaryBatchInput({
+        documentId: "d",
+        locale: "ru",
+        generationId: "11111111-1111-4111-8111-111111111111",
+      }),
+      {
+        documentId: "d",
+        locale: "ru",
+        generationId: "11111111-1111-4111-8111-111111111111",
+      },
+    );
+    assert.equal(
+      validSummaryBatchInput({
+        documentId: "d",
+        locale: "de",
+        generationId: "stale",
+      }),
+      null,
+    );
+    assert.deepEqual(
+      validSynthesizeInput({
+        documentId: "d",
+        locale: "de",
+        generationId: "11111111-1111-4111-8111-111111111111",
+      }),
+      {
+        documentId: "d",
+        locale: "de",
+        generationId: "11111111-1111-4111-8111-111111111111",
+      },
+    );
+    assert.equal(
+      validSynthesizeInput({ documentId: "d", locale: "de" }),
+      null,
+    );
+  });
+});
+
+describe("summarizeNextSpan", () => {
+  const GEN = "11111111-1111-4111-8111-111111111111";
+  const DOC_ROW = {
+    id: "doc-1",
+    name: "Vorlesung.pptx",
+    extraction_status: "completed",
+  };
+  const CHUNK_ROWS = [1, 2, 3, 4].map((slide) => ({
+    id: `s${slide}`,
+    document_id: "doc-1",
+    chunk_index: slide - 1,
+    content: `FOLIE-${slide}-TEXT ${"x".repeat(1500)}`,
+    source_refs: [{ kind: "slide", slide }],
+  }));
+
+  function summaryRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "sum-1",
+      user_id: "user-1",
+      document_id: "doc-1",
+      status: "partial",
+      active_final_md: "",
+      active_final_refs: [],
+      active_completed_at: null,
+      draft_generation_id: GEN,
+      draft_planned: [
+        { key: "slide:1-2", label: "Folien 1–2", order: 0 },
+        { key: "slide:3-4", label: "Folien 3–4", order: 1 },
+      ],
+      draft_spans: [],
+      draft_preview_md: "",
+      draft_preview_refs: [],
+      draft_started_at: "2026-10-31T09:00:00.000Z",
+      ...overrides,
+    };
+  }
+
+  function stubDocAndChunks(): void {
+    onRest("GET", "study_documents", () => json([DOC_ROW]));
+    onRest("GET", "retrieval_chunks", () => json(CHUNK_ROWS));
+  }
+
+  it("creates a draft and persists the first span", async () => {
+    stubDocAndChunks();
+    onRest("GET", "study_summaries", () => json([]));
+    let inserted: Record<string, unknown> = {};
+    onRest("POST", "study_summaries", (args) => {
+      const rows = JSON.parse(args.body ?? "[]") as Record<string, unknown>[];
+      inserted = rows[0] ?? {};
+
+      return json([inserted]);
+    });
+    const patches: Record<string, unknown>[] = [];
+    onRest("PATCH", "study_summaries", (args) => {
+      patches.push(JSON.parse(args.body ?? "{}") as Record<string, unknown>);
+
+      return json([{}]);
+    });
+    ollamaWith(["Überblick [Q1] und Details [Q2]."]);
+
+    const outcome = await summarizeNextSpan(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: null,
+    });
+
+    assert.equal(outcome.ok, true);
+
+    if (!outcome.ok) return;
+
+    assert.equal(outcome.response.span.key, "slide:1-2");
+    assert.equal(outcome.response.span.label, "Folien 1–2");
+    assert.equal(outcome.response.span.index, 0);
+    assert.equal(outcome.response.span.total, 2);
+    assert.equal(
+      outcome.response.text,
+      "Überblick (Folie 1) und Details (Folie 2).",
+    );
+    assert.deepEqual(outcome.response.refs, ["Folie 1", "Folie 2"]);
+    assert.equal(outcome.response.processedUnits, 2);
+    assert.equal(outcome.response.usableUnits, 4);
+    assert.equal(outcome.response.percent, 50);
+    assert.equal(outcome.response.done, false);
+    assert.ok(typeof inserted.draft_generation_id === "string");
+    assert.equal(
+      outcome.response.generationId,
+      inserted.draft_generation_id,
+    );
+    assert.equal(patches.length, 1);
+    assert.equal(
+      (patches[0]?.draft_spans as unknown[]).length,
+      1,
+    );
+  });
+
+  it("resumes a matching draft and prunes stale spans", async () => {
+    stubDocAndChunks();
+    onRest("GET", "study_summaries", () =>
+      json([
+        summaryRow({
+          draft_spans: [
+            {
+              key: "slide:9-9",
+              label: "Folie 9",
+              text: "Alt.",
+              refs: [],
+              completedAt: "2026-10-30T10:00:00.000Z",
+            },
+            {
+              key: "slide:1-2",
+              label: "Folien 1–2",
+              text: "Bereits da.",
+              refs: ["Folie 1"],
+              completedAt: "2026-10-31T10:00:00.000Z",
+            },
+          ],
+        }),
+      ]),
+    );
+    const patches: Record<string, unknown>[] = [];
+    onRest("PATCH", "study_summaries", (args) => {
+      patches.push(JSON.parse(args.body ?? "{}") as Record<string, unknown>);
+
+      return json([{}]);
+    });
+    ollamaWith(["Zweiter Teil [Q1]."]);
+
+    const outcome = await summarizeNextSpan(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: GEN,
+    });
+
+    assert.equal(outcome.ok, true);
+
+    if (!outcome.ok) return;
+
+    assert.equal(outcome.response.span.key, "slide:3-4");
+    assert.equal(outcome.response.span.index, 1);
+    assert.equal(outcome.response.percent, 100);
+    const spans = patches[0]?.draft_spans as { key: string }[];
+
+    assert.deepEqual(
+      spans.map((span) => span.key),
+      ["slide:1-2", "slide:3-4"],
+    );
+  });
+
+  it("rejects stale generations without calling the model", async () => {
+    stubDocAndChunks();
+    onRest("GET", "study_summaries", () => json([summaryRow()]));
+
+    const outcome = await summarizeNextSpan(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: "22222222-2222-4222-8222-222222222222",
+    });
+
+    assert.deepEqual(outcome, {
+      ok: false,
+      http: 409,
+      message: "Unbekannte oder abgelaufene Generierung — bitte neu starten.",
+    });
+    assert.ok(hits.every((hit) => !hit.url.includes("11434")));
+  });
+
+  it("reports done when every span persisted", async () => {
+    stubDocAndChunks();
+    onRest("GET", "study_summaries", () =>
+      json([
+        summaryRow({
+          draft_spans: [
+            {
+              key: "slide:1-2",
+              label: "Folien 1–2",
+              text: "Eins.",
+              refs: [],
+              completedAt: "2026-10-31T10:00:00.000Z",
+            },
+            {
+              key: "slide:3-4",
+              label: "Folien 3–4",
+              text: "Zwei.",
+              refs: [],
+              completedAt: "2026-10-31T10:01:00.000Z",
+            },
+          ],
+        }),
+      ]),
+    );
+    onRest("PATCH", "study_summaries", () => json([{}]));
+
+    const outcome = await summarizeNextSpan(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: GEN,
+    });
+
+    assert.equal(outcome.ok, true);
+
+    if (!outcome.ok) return;
+
+    assert.equal(outcome.response.done, true);
+    assert.equal(outcome.response.percent, 100);
+    assert.ok(hits.every((hit) => !hit.url.includes("11434")));
+  });
+
+  it("rejects documents without usable text", async () => {
+    onRest("GET", "study_documents", () => json([DOC_ROW]));
+    onRest("GET", "retrieval_chunks", () => json([]));
+    onRest("GET", "study_summaries", () => json([]));
+
+    const outcome = await summarizeNextSpan(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: null,
+    });
+
+    assert.deepEqual(outcome, {
+      ok: false,
+      http: 409,
+      message: "Zu diesem Dokument liegen keine auswertbaren Textstellen vor.",
+    });
+    assert.ok(hits.every((hit) => !hit.url.includes("11434")));
+  });
+
+  it("maps batch truncation without persisting a span", async () => {
+    stubDocAndChunks();
+    onRest("GET", "study_summaries", () => json([]));
+    onRest("POST", "study_summaries", () => json([{}]));
+    let patched = 0;
+    onRest("PATCH", "study_summaries", () => {
+      patched += 1;
+
+      return json([{}]);
+    });
+    routes.push({
+      match: (args) => args.url === "http://127.0.0.1:11434/api/chat",
+      respond: () =>
+        json({
+          message: { content: "" },
+          done: true,
+          done_reason: "length",
+          eval_count: 1200,
+        }),
+    });
+
+    await assert.rejects(
+      summarizeNextSpan(DB, {
+        documentId: "doc-1",
+        locale: "de",
+        generationId: null,
+      }),
+      (error: unknown) =>
+        error instanceof ProviderError && error.code === "truncated",
+    );
+    assert.equal(patched, 0);
+  });
+
+  it("returns 404/409 for missing or unprocessed documents", async () => {
+    onRest("GET", "study_documents", () => json([]));
+
+    assert.deepEqual(
+      await summarizeNextSpan(DB, {
+        documentId: "missing",
+        locale: "de",
+        generationId: null,
+      }),
+      { ok: false, http: 404, message: "Dokument nicht gefunden." },
+    );
+
+    routes.length = 0;
+    onRest("GET", "study_documents", () =>
+      json([{ ...DOC_ROW, extraction_status: "processing" }]),
+    );
+
+    assert.deepEqual(
+      await summarizeNextSpan(DB, {
+        documentId: "doc-1",
+        locale: "de",
+        generationId: null,
+      }),
+      {
+        ok: false,
+        http: 409,
+        message: "Das Dokument ist noch nicht verarbeitet.",
+      },
+    );
+  });
+});
+
+describe("synthesizeSummary", () => {
+  const GEN = "11111111-1111-4111-8111-111111111111";
+  const DOC_ROW = {
+    id: "doc-1",
+    name: "Vorlesung.pptx",
+    extraction_status: "completed",
+  };
+  const CHUNK_ROWS = [1, 2, 3, 4].map((slide) => ({
+    id: `s${slide}`,
+    document_id: "doc-1",
+    chunk_index: slide - 1,
+    content: `FOLIE-${slide}-TEXT ${"x".repeat(1500)}`,
+    source_refs: [{ kind: "slide", slide }],
+  }));
+
+  function summaryRow(spans: unknown[]) {
+    return {
+      id: "sum-1",
+      user_id: "user-1",
+      document_id: "doc-1",
+      status: "partial",
+      active_final_md: "",
+      active_final_refs: [],
+      active_completed_at: null,
+      draft_generation_id: GEN,
+      draft_planned: [
+        { key: "slide:1-2", label: "Folien 1–2", order: 0 },
+        { key: "slide:3-4", label: "Folien 3–4", order: 1 },
+      ],
+      draft_spans: spans,
+      draft_preview_md: "",
+      draft_preview_refs: [],
+      draft_started_at: "2026-10-31T09:00:00.000Z",
+    };
+  }
+
+  function span(key: string, label: string) {
+    return {
+      key,
+      label,
+      text: `Text ${label}.`,
+      refs: [label],
+      completedAt: "2026-10-31T10:00:00.000Z",
+    };
+  }
+
+  function stubDocAndChunks(): void {
+    onRest("GET", "study_documents", () => json([DOC_ROW]));
+    onRest("GET", "retrieval_chunks", () => json(CHUNK_ROWS));
+  }
+
+  it("promotes a complete synthesis to active", async () => {
+    stubDocAndChunks();
+    onRest("GET", "study_summaries", () =>
+      json([summaryRow([span("slide:1-2", "Folien 1–2"), span("slide:3-4", "Folien 3–4")])]),
+    );
+    const patches: Record<string, unknown>[] = [];
+    onRest("PATCH", "study_summaries", (args) => {
+      patches.push(JSON.parse(args.body ?? "{}") as Record<string, unknown>);
+
+      return json([{}]);
+    });
+    ollamaWith(["Final (Folien 1–2) und (Folien 3–4)."]);
+
+    const outcome = await synthesizeSummary(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: GEN,
+    });
+
+    assert.equal(outcome.ok, true);
+
+    if (!outcome.ok) return;
+
+    assert.equal(outcome.response.complete, true);
+    assert.equal(outcome.response.levels, 1);
+    assert.deepEqual(outcome.response.refs, ["Folien 1–2", "Folien 3–4"]);
+    assert.equal(patches.length, 1);
+    assert.equal(
+      patches[0]?.active_final_md,
+      "Final (Folien 1–2) und (Folien 3–4).",
+    );
+    assert.equal(patches[0]?.status, "complete");
+    assert.equal(patches[0]?.draft_generation_id, null);
+    assert.deepEqual(patches[0]?.draft_spans, []);
+  });
+
+  it("stores a partial preview and keeps the draft", async () => {
+    stubDocAndChunks();
+    onRest("GET", "study_summaries", () =>
+      json([summaryRow([span("slide:1-2", "Folien 1–2")])]),
+    );
+    const patches: Record<string, unknown>[] = [];
+    onRest("PATCH", "study_summaries", (args) => {
+      patches.push(JSON.parse(args.body ?? "{}") as Record<string, unknown>);
+
+      return json([{}]);
+    });
+    ollamaWith(["Teilweise (Folien 1–2)."]);
+
+    const outcome = await synthesizeSummary(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: GEN,
+    });
+
+    assert.equal(outcome.ok, true);
+
+    if (!outcome.ok) return;
+
+    assert.equal(outcome.response.complete, false);
+    assert.equal(patches.length, 1);
+    assert.equal(patches[0]?.draft_preview_md, "Teilweise (Folien 1–2).");
+    assert.ok(!("active_final_md" in (patches[0] ?? {})));
+    assert.ok(!("draft_generation_id" in (patches[0] ?? {})));
+  });
+
+  it("rejects fabricated refs without writing", async () => {
+    stubDocAndChunks();
+    onRest("GET", "study_summaries", () =>
+      json([summaryRow([span("slide:1-2", "Folien 1–2"), span("slide:3-4", "Folien 3–4")])]),
+    );
+    let patched = 0;
+    onRest("PATCH", "study_summaries", () => {
+      patched += 1;
+
+      return json([{}]);
+    });
+    ollamaWith(["Final (Folie 99)."]);
+
+    await assert.rejects(
+      synthesizeSummary(DB, {
+        documentId: "doc-1",
+        locale: "de",
+        generationId: GEN,
+      }),
+      (error: unknown) =>
+        error instanceof ProviderError && error.code === "malformed",
+    );
+    assert.equal(patched, 0);
+  });
+
+  it("maps truncation to a retryable error without writing", async () => {
+    stubDocAndChunks();
+    onRest("GET", "study_summaries", () =>
+      json([summaryRow([span("slide:1-2", "Folien 1–2"), span("slide:3-4", "Folien 3–4")])]),
+    );
+    let patched = 0;
+    onRest("PATCH", "study_summaries", () => {
+      patched += 1;
+
+      return json([{}]);
+    });
+    routes.push({
+      match: (args) => args.url === "http://127.0.0.1:11434/api/chat",
+      respond: () =>
+        json({
+          message: { content: "" },
+          done: true,
+          done_reason: "length",
+          eval_count: 2000,
+        }),
+    });
+
+    await assert.rejects(
+      synthesizeSummary(DB, {
+        documentId: "doc-1",
+        locale: "de",
+        generationId: GEN,
+      }),
+      (error: unknown) =>
+        error instanceof ProviderError && error.code === "truncated",
+    );
+    assert.equal(patched, 0);
+  });
+
+  it("reduces hierarchically when sections exceed the budget", async () => {
+    const bigChunks = [1, 2, 3, 4, 5, 6, 7, 8].map((slide) => ({
+      id: `s${slide}`,
+      document_id: "doc-1",
+      chunk_index: slide - 1,
+      content: `FOLIE-${slide}-TEXT ${"x".repeat(1500)}`,
+      source_refs: [{ kind: "slide", slide }],
+    }));
+    onRest("GET", "study_documents", () => json([DOC_ROW]));
+    onRest("GET", "retrieval_chunks", () => json(bigChunks));
+    const keys = ["slide:1-2", "slide:3-4", "slide:5-6", "slide:7-8"];
+    onRest("GET", "study_summaries", () =>
+      json([
+        {
+          id: "sum-1",
+          document_id: "doc-1",
+          status: "partial",
+          active_final_md: "",
+          active_final_refs: [],
+          active_completed_at: null,
+          draft_generation_id: GEN,
+          draft_planned: keys.map((key, order) => ({
+            key,
+            label: `Span ${order}`,
+            order,
+          })),
+          draft_spans: keys.map((key) => ({
+            key,
+            label: `Span ${key}`,
+            text: "y".repeat(2100),
+            refs: [],
+            completedAt: "2026-10-31T10:00:00.000Z",
+          })),
+          draft_preview_md: "",
+          draft_preview_refs: [],
+          draft_started_at: "2026-10-31T09:00:00.000Z",
+        },
+      ]),
+    );
+    onRest("PATCH", "study_summaries", () => json([{}]));
+    ollamaWith([
+      "Zwischen eins (Folien 1–2).",
+      "Zwischen zwei (Folien 5–6).",
+      "Final (Folien 1–2) und (Folien 5–6).",
+    ]);
+
+    const outcome = await synthesizeSummary(DB, {
+      documentId: "doc-1",
+      locale: "de",
+      generationId: GEN,
+    });
+
+    assert.equal(outcome.ok, true);
+
+    if (!outcome.ok) return;
+
+    assert.equal(outcome.response.complete, true);
+    assert.equal(outcome.response.levels, 2);
+    assert.equal(
+      hits.filter((hit) => hit.url.includes("11434")).length,
+      3,
+    );
+  });
+
+  it("returns 404/409 without a matching draft", async () => {
+    stubDocAndChunks();
+    onRest("GET", "study_summaries", () => json([]));
+
+    assert.deepEqual(
+      await synthesizeSummary(DB, {
+        documentId: "doc-1",
+        locale: "de",
+        generationId: GEN,
+      }),
+      { ok: false, http: 404, message: "Keine Zusammenfassung vorhanden." },
+    );
+
+    routes.length = 0;
+    stubDocAndChunks();
+    onRest("GET", "study_summaries", () =>
+      json([
+        {
+          id: "sum-1",
+          document_id: "doc-1",
+          status: "partial",
+          active_final_md: "",
+          active_final_refs: [],
+          active_completed_at: null,
+          draft_generation_id: GEN,
+          draft_planned: [],
+          draft_spans: [],
+          draft_preview_md: "",
+          draft_preview_refs: [],
+          draft_started_at: "2026-10-31T09:00:00.000Z",
+        },
+      ]),
+    );
+
+    assert.deepEqual(
+      await synthesizeSummary(DB, {
+        documentId: "doc-1",
+        locale: "de",
+        generationId: "22222222-2222-4222-8222-222222222222",
+      }),
+      {
+        ok: false,
+        http: 409,
+        message: "Unbekannte oder abgelaufene Generierung — bitte neu starten.",
+      },
+    );
+  });
+});
+
+describe("generation locks", () => {
+  it("grants one holder per user and document", () => {
+    const key = generationLockKey("user-1", "doc-1");
+    const otherDoc = generationLockKey("user-1", "doc-2");
+    const otherUser = generationLockKey("user-2", "doc-1");
+
+    assert.equal(tryAcquireGenerationLock(key), true);
+    assert.equal(tryAcquireGenerationLock(key), false);
+    assert.equal(tryAcquireGenerationLock(otherDoc), true);
+    assert.equal(tryAcquireGenerationLock(otherUser), true);
+
+    releaseGenerationLock(key);
+    releaseGenerationLock(otherDoc);
+    releaseGenerationLock(otherUser);
+
+    assert.equal(tryAcquireGenerationLock(key), true);
+
+    releaseGenerationLock(key);
   });
 });

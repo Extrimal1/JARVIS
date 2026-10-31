@@ -49,6 +49,7 @@ describe("extractDocument", () => {
     assert.match(doc.blocks[0]?.text ?? "", /Moleküle/);
     assert.match(doc.blocks[1]?.text ?? "", /Citratzyklus/);
     assert.match(doc.blocks[1]?.text ?? "", /Phosphorylierung/);
+    assert.equal(doc.pageCount, 2);
   });
 
   it("extracts DOCX paragraphs with stable numbering + footnotes", async () => {
@@ -70,6 +71,7 @@ describe("extractDocument", () => {
     assert.match(texts[2] ?? "", /Forschung & Freiheit/);
     assert.ok(!(texts[2] ?? "").includes("&amp;"));
     assert.match(texts[3] ?? "", /Fußnoten: Bastille/);
+    assert.equal(doc.pageCount, null);
   });
 
   it("extracts PPTX slides and skips textless slides", async () => {
@@ -80,6 +82,10 @@ describe("extractDocument", () => {
     assert.deepEqual(doc.blocks[1]?.ref, { kind: "slide", slide: 2 });
     assert.match(doc.blocks[0]?.text ?? "", /Trägheitsprinzip/);
     assert.match(doc.blocks[1]?.text ?? "", /Masse mal Beschleunigung/);
+    assert.equal(doc.pageCount, 3);
+    assert.deepEqual(doc.warnings, [
+      "1 von 3 Folien enthalten keinen lesbaren Text.",
+    ]);
   });
 
   it("groups TXT into line blocks", async () => {
@@ -97,6 +103,7 @@ describe("extractDocument", () => {
       end: 65,
     });
     assert.match(doc.blocks[0]?.text ?? "", /Periodensystem/);
+    assert.equal(doc.pageCount, null);
   });
 
   it("rejects unknown kinds", async () => {

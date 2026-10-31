@@ -21,7 +21,10 @@ import { QuizPanel } from "@/src/components/study/QuizPanel";
 import { RevisionPanel } from "@/src/components/study/RevisionPanel";
 import { daysBetween, formatDaysLeft } from "@/src/lib/briefing";
 import { markReviewed } from "@/src/lib/revision";
-import { useStudy } from "@/src/lib/db/useModules";
+import { useQuiz, useStudy } from "@/src/lib/db/useModules";
+import type { ListResource } from "@/src/lib/db/useRemoteResource";
+import type { QuizQuestion } from "@/src/lib/quiz";
+import type { QuizReviewPatch } from "@/src/lib/quizReview";
 import { type Entry, type StudyData } from "@/src/lib/study";
 
 const initialData: StudyData = {
@@ -86,6 +89,7 @@ function StudySection({
   onAdd,
   onDelete,
   onToggle,
+  quizStore,
 }: {
   sectionKey: SectionKey;
   title: string;
@@ -96,6 +100,8 @@ function StudySection({
   onAdd: (key: SectionKey, entry: Entry) => void;
   onDelete: (key: SectionKey, id: string) => void;
   onToggle: (id: string) => void;
+  /** Shared quiz store, used only by the materials section. */
+  quizStore?: ListResource<QuizQuestion>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [name, setName] = useState("");
@@ -340,6 +346,7 @@ function StudySection({
             onSaveMaterial={async (entry) => {
               await onAdd("materials", entry);
             }}
+            quizStore={quizStore}
           />
         </div>
       )}
@@ -349,6 +356,7 @@ function StudySection({
 
 export default function StudyPage() {
   const studyStore = useStudy(initialData);
+  const quizStore = useQuiz();
   const data = studyStore.data;
 
   async function addEntry(key: SectionKey, entry: Entry) {
@@ -377,6 +385,10 @@ export default function StudyPage() {
       reviewStage: reviewed.reviewStage,
       done: reviewed.done,
     });
+  }
+
+  async function reviewQuestion(id: string, patch: QuizReviewPatch) {
+    return quizStore.update(id, patch);
   }
 
   const today = useToday();
@@ -533,6 +545,7 @@ export default function StudyPage() {
                 onAdd={addEntry}
                 onDelete={deleteEntry}
                 onToggle={toggleTopic}
+                quizStore={quizStore}
               />
             ))}
           </div>
@@ -541,11 +554,17 @@ export default function StudyPage() {
             className="jarvis-enter mt-8 space-y-5"
             style={{ "--enter-delay": "180ms" } as React.CSSProperties}
           >
-            <RevisionPanel topics={data.topics} onReview={reviewTopic} />
+            <RevisionPanel
+              topics={data.topics}
+              onReview={reviewTopic}
+              questions={quizStore.items}
+              onReviewQuestion={reviewQuestion}
+            />
             <QuizPanel
               subjects={data.subjects}
               exams={data.exams}
               topics={data.topics}
+              store={quizStore}
             />
           </div>
 

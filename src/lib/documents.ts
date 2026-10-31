@@ -34,6 +34,11 @@ export type DocumentMeta = {
   /** Upload timestamp as ISO string. */
   uploadedAt: string;
   extractionStatus: ExtractionStatus;
+  /**
+   * Total PDF pages / PPTX slides. Absent or null means unknown
+   * (never processed, or processed before totals were tracked).
+   */
+  pageCount?: number | null;
 };
 
 /** Maximum upload size: 10 MB per file. */
@@ -251,11 +256,12 @@ export async function extractText(
 export type { SourceRef } from "@/src/lib/study/extract";
 
 const DB_NAME = "jarvis-documents";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const META_STORE = "meta";
 const BLOB_STORE = "blobs";
 const TEXT_STORE = "texts";
 export const CHUNKS_STORE = "chunks";
+export const SUMMARIES_STORE = "summaries";
 
 export function isIndexedDBAvailable(): boolean {
   return typeof indexedDB !== "undefined";
@@ -297,6 +303,10 @@ export function openDatabase(): Promise<IDBDatabase> {
 
       if (!db.objectStoreNames.contains(TEXT_STORE)) {
         db.createObjectStore(TEXT_STORE, { keyPath: "id" });
+      }
+
+      if (!db.objectStoreNames.contains(SUMMARIES_STORE)) {
+        db.createObjectStore(SUMMARIES_STORE, { keyPath: "id" });
       }
     };
 
@@ -404,7 +414,7 @@ export async function getDocumentBlob(id: string): Promise<Blob | null> {
 }
 
 type MetaPatch = Partial<
-  Pick<DocumentMeta, "subject" | "description" | "extractionStatus">
+  Pick<DocumentMeta, "subject" | "description" | "extractionStatus" | "pageCount">
 >;
 
 /** Updates safe metadata fields. Returns null when the document is gone. */
@@ -437,19 +447,20 @@ export async function updateDocumentMeta(
   }
 }
 
-/** Removes metadata, binary, extracted text, and chunks in one transaction. */
+/** Removes metadata, binary, extracted text, chunks, and summaries in one transaction. */
 export async function deleteDocument(id: string): Promise<void> {
   const db = await openDatabase();
 
   try {
     const transaction = db.transaction(
-      [META_STORE, BLOB_STORE, TEXT_STORE, CHUNKS_STORE],
+      [META_STORE, BLOB_STORE, TEXT_STORE, CHUNKS_STORE, SUMMARIES_STORE],
       "readwrite",
     );
     transaction.objectStore(META_STORE).delete(id);
     transaction.objectStore(BLOB_STORE).delete(id);
     transaction.objectStore(TEXT_STORE).delete(id);
     transaction.objectStore(CHUNKS_STORE).delete(id);
+    transaction.objectStore(SUMMARIES_STORE).delete(id);
     await transactionToPromise(
       transaction,
       "Dokument konnte nicht gelöscht werden.",
