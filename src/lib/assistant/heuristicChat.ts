@@ -271,6 +271,54 @@ function summarizeRead(toolId: string | null, data: unknown): string {
         ),
       );
     }
+    case "lifestyle.placesSearch": {
+      const places = itemsOf(data, "places");
+      const notice = isRecord(data) ? str(data.notice) : "";
+      const provider =
+        isRecord(data) && isRecord(data.diagnostics)
+          ? str(data.diagnostics.provider)
+          : "";
+
+      if (places.length === 0) {
+        return (
+          notice ||
+          "Keine Orte gefunden. Versuche einen allgemeineren Suchtext oder eine andere Umgebung."
+        );
+      }
+
+      // Real tool results only: name + provider address + map link.
+      // Generic ideas are never mixed in — an empty tool result stays
+      // an honest empty state, never invented venues.
+      const lines = places.map((place) => {
+        const address = str(place.address);
+        const hours = str(place.openingHours);
+        const lat = num(place.latitude);
+        const lon = num(place.longitude);
+        const map =
+          lat === null || lon === null
+            ? ""
+            : ` – Karte: https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`;
+
+        return (
+          `${str(place.name) || "Ort"}` +
+          (address === "" ? "" : ` – ${address}`) +
+          (hours === "" ? "" : ` (laut OpenStreetMap: ${hours})`) +
+          map
+        );
+      });
+      const source =
+        provider === "overpass"
+          ? "Quelle: OpenStreetMap (live, Umkreissuche)."
+          : provider === "nominatim"
+            ? "Quelle: OpenStreetMap (live, Textsuche)."
+            : "Quelle: OpenStreetMap (live).";
+
+      return (
+        bullets(lines) +
+        (notice === "" ? "" : `\nHinweis: ${notice}`) +
+        `\n${source}`
+      );
+    }
     case "memory.approved": {
       const entries = itemsOf(data, "entries");
 
@@ -281,6 +329,139 @@ function summarizeRead(toolId: string | null, data: unknown): string {
           (entry) =>
             `${str(entry.title) || "Eintrag"}: ${str(entry.content).slice(0, 120)}`,
         ),
+      );
+    }
+    case "briefing.today": {
+      if (!isRecord(data)) return "Kein Tagesbriefing verfügbar.";
+
+      const sections: string[] = [];
+      const todayData = isRecord(data.today) ? data.today : null;
+      const events = todayData !== null ? itemsOf(todayData, "events") : [];
+
+      sections.push(
+        events.length === 0
+          ? "Heute: keine Termine."
+          : `Heute: ${events.length} ${events.length === 1 ? "Termin" : "Termine"} — ` +
+              events
+                .slice(0, 5)
+                .map(
+                  (event) =>
+                    `${str(event.title) || "Termin"} ${str(event.start)}`,
+                )
+                .join("; ") +
+              (events.length > 5 ? ` (+${events.length - 5} weitere)` : "") +
+              ".",
+      );
+
+      const tasksData = isRecord(data.tasks) ? data.tasks : null;
+      const open = tasksData !== null ? itemsOf(tasksData, "open") : [];
+      const overdue = tasksData !== null ? itemsOf(tasksData, "overdue") : [];
+
+      sections.push(
+        open.length === 0
+          ? "Aufgaben: keine offen."
+          : `Aufgaben: ${open.length} offen` +
+              (overdue.length > 0 ? ` (${overdue.length} überfällig)` : "") +
+              ".",
+      );
+
+      const deadlinesData = isRecord(data.deadlines) ? data.deadlines : null;
+      const deadlines =
+        deadlinesData !== null ? itemsOf(deadlinesData, "deadlines") : [];
+      const urgent = deadlines.filter((deadline) => {
+        const daysLeft = num(deadline.daysLeft);
+
+        return daysLeft !== null && daysLeft <= 7;
+      });
+
+      sections.push(
+        urgent.length === 0
+          ? "Prüfungen/Fristen: nichts Dringendes in den nächsten 7 Tagen."
+          : `Prüfungen/Fristen: ${bullets(
+              urgent.slice(0, 5).map((deadline) => {
+                const daysLeft = num(deadline.daysLeft);
+
+                return `${str(deadline.title) || "Frist"} (${daysLeft === null ? "?" : daysLeft < 0 ? `überfällig seit ${-daysLeft} Tagen` : daysLeft === 0 ? "heute" : `in ${daysLeft} Tagen`})`;
+              }),
+            )}`,
+      );
+
+      const financeData = isRecord(data.finance) ? data.finance : null;
+      const expense =
+        financeData !== null ? num(financeData.expenseCents) : null;
+      const income = financeData !== null ? num(financeData.incomeCents) : null;
+
+      sections.push(
+        expense === null || income === null
+          ? "Finanzen: keine Daten."
+          : `Finanzen (${str(financeData?.monthKey)}): Ausgaben ${formatCents(expense)}, Einnahmen ${formatCents(income)}.`,
+      );
+
+      return sections.join("\n");
+    }
+    case "study.documents": {
+      const docs = itemsOf(data, "documents");
+
+      if (docs.length === 0) return "Keine Dokumente hochgeladen.";
+
+      return bullets(
+        docs.map((doc) => {
+          const status = str(doc.extractionStatus);
+          const statusNote =
+            status === "" || status === "completed"
+              ? ""
+              : ` (${status})`;
+
+          return `${str(doc.name) || "Dokument"}${statusNote}`;
+        }),
+      );
+    }
+    case "study.retrieve": {
+      const sources = itemsOf(data, "sources");
+
+      if (sources.length === 0) {
+        return "Die Unterlagen enthalten nichts zu dieser Frage.";
+      }
+
+      return (
+        bullets(
+          sources.map((source) => {
+            const marker = str(source.marker);
+            const name = str(source.documentName) || "Dokument";
+            const ref = str(source.refLabel);
+            const text = str(source.text).slice(0, 200);
+
+            return `${marker === "" ? "•" : marker} ${name}${ref === "" ? "" : `, ${ref}`}: ${text}`;
+          }),
+        ) + "\nNur diese Quellen wurden verwendet."
+      );
+    }
+    case "lecture.overview": {
+      if (!isRecord(data)) return "Keine Vorlesungsdaten verfügbar.";
+
+      const sessions = num(data.sessionCount) ?? 0;
+      const recordings = num(data.recordingCount) ?? 0;
+
+      if (sessions === 0 && recordings === 0) {
+        return "Keine Vorlesungen oder Aufnahmen vorhanden.";
+      }
+
+      const recent = itemsOf(data, "recent");
+      const head = `${sessions} ${sessions === 1 ? "Sitzung" : "Sitzungen"}, ${recordings} ${recordings === 1 ? "Aufnahme" : "Aufnahmen"}.`;
+
+      if (recent.length === 0) return head;
+
+      return (
+        head +
+        "\n" +
+        bullets(
+          recent.slice(0, 5).map((recording) => {
+            const seconds = num(recording.durationSeconds) ?? 0;
+            const minutes = Math.round(seconds / 60);
+
+            return `${str(recording.title) || "Aufnahme"} (${minutes} Min.)`;
+          }),
+        )
       );
     }
     default:
@@ -298,11 +479,17 @@ function finalFromToolResult(raw: string, toolId: string | null): string {
     });
   }
 
+  if (typeof parsed.gekürzt === "string") {
+    return JSON.stringify({ final: parsed.gekürzt });
+  }
+
   if (parsed.ok !== true) {
     const message =
       isRecord(parsed.error) && typeof parsed.error.message === "string"
         ? parsed.error.message
-        : "Unbekannter Fehler.";
+        : typeof parsed.error === "string"
+          ? parsed.error
+          : "Unbekannter Fehler.";
 
     return JSON.stringify({ final: `Fehler: ${message}` });
   }

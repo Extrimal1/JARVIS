@@ -15,9 +15,9 @@ import {
 } from "@/src/lib/supabase/db";
 import { SupabaseHttpError } from "@/src/lib/supabase/supabase";
 import {
-  createSignedDownloadUrl,
   createSignedUploadUrl,
   deleteObject,
+  downloadBytes,
   ownerPath,
 } from "@/src/lib/supabase/storage";
 
@@ -61,9 +61,13 @@ function detectKind(name: string, mime: string): DocumentKind | null {
   const ext = (name.split(".").pop() ?? "").toLowerCase();
 
   for (const kind of ["pdf", "docx", "pptx", "txt", "md"] as const) {
+    // Empty type (browser could not determine it) is accepted like
+    // the local validateFile fallback; the extension decides.
     if (
       KIND_EXTENSIONS[kind].includes(ext) &&
-      (KIND_MIMES[kind].includes(mime) || mime === "application/octet-stream")
+      (KIND_MIMES[kind].includes(mime) ||
+        mime === "application/octet-stream" ||
+        mime === "")
     ) {
       return kind;
     }
@@ -297,43 +301,155 @@ export async function updateStudyDocMeta(
   return doc;
 }
 
-export async function downloadStudyDoc(
+/** Canonical response Content-Type per document kind. */
+export const KIND_CONTENT_TYPES: Record<DocumentKind, string> = {
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  txt: "text/plain;charset=utf-8",
+  md: "text/markdown;charset=utf-8",
+};
+
+function isDocumentKind(value: unknown): value is DocumentKind {
+  return (
+    value === "pdf" ||
+    value === "docx" ||
+    value === "pptx" ||
+    value === "txt" ||
+    value === "md"
+  );
+}
+
+/** ASCII fallback for Content-Disposition (quotes/backslashes stripped). */
+export function asciiFileName(name: string): string {
+  const ascii = name.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+
+  return ascii === "" ? "dokument" : ascii;
+}
+
+/**
+ * Download response headers: always `inline` so previews render
+ * in-app (the client forces "save" via the anchor `download`
+ * attribute). RFC 5987 `filename*` keeps umlauts intact; the ASCII
+ * `filename` is a fallback for old clients.
+ */
+export function buildDownloadHeaders(input: {
+  contentType: string;
+  fileName: string;
+  byteLength: number;
+}): Record<string, string> {
+  const safe = input.fileName === "" ? "dokument" : input.fileName;
+
+  return {
+    "Content-Type": input.contentType,
+    "Content-Length": String(input.byteLength),
+    "Content-Disposition": `inline; filename="${asciiFileName(safe)}"; filename*=UTF-8''${encodeURIComponent(safe)}`,
+    "Cache-Control": "private, no-store",
+    "X-Content-Type-Options": "nosniff",
+  };
+}
+
+export type StudyDocVariant = "file" | "text";
+
+export type StudyDocBytesResult =
+  | {
+      status: "ok";
+      bytes: ArrayBuffer;
+      contentType: string;
+      fileName: string;
+    }
+  | { status: "not-found" }
+  | { status: "no-text" };
+
+function isMissingObject(error: unknown): boolean {
+  return (
+    error instanceof SupabaseHttpError &&
+    error.message === "Object not found"
+  );
+}
+
+/**
+ * Loads one owned document's bytes from private Storage with the
+ * caller's user JWT (RLS applies; no service-role key involved).
+ * `file` returns the original upload, `text` the extracted plain
+ * text (`no-text` when extraction never stored one).
+ */
+export async function downloadStudyDocBytes(
   db: DbClient,
   id: string,
-): Promise<{ url: string; textUrl: string | null } | null> {
+  variant: StudyDocVariant,
+): Promise<StudyDocBytesResult> {
   const row = await dbGetOne<Record<string, unknown>>(
     db,
     "study_documents",
     id,
   );
 
-  if (
-    row === null ||
-    typeof row.storage_path !== "string" ||
-    row.storage_path === ""
-  ) {
-    return null;
+  if (row === null) {
+    return { status: "not-found" };
   }
 
-  try {
-    const url = await createSignedDownloadUrl(db, STUDY_BUCKET, row.storage_path, 600);
+  if (variant === "text") {
     const textPath =
       typeof row.text_path === "string" && row.text_path !== ""
         ? row.text_path
         : null;
-    const textUrl =
-      textPath === null
-        ? null
-        : await createSignedDownloadUrl(db, STUDY_BUCKET, textPath, 600);
 
-    return { url, textUrl };
+    if (textPath === null) {
+      return { status: "no-text" };
+    }
+
+    try {
+      const downloaded = await downloadBytes(db, STUDY_BUCKET, textPath);
+
+      return {
+        status: "ok",
+        bytes: downloaded.bytes,
+        contentType: "text/plain;charset=utf-8",
+        fileName: `${typeof row.name === "string" && row.name !== "" ? row.name : "dokument"}.txt`,
+      };
+    } catch (error) {
+      // Text row set but object gone: preview data lost, not the doc.
+      if (isMissingObject(error)) {
+        return { status: "no-text" };
+      }
+
+      throw error;
+    }
+  }
+
+  if (
+    typeof row.storage_path !== "string" ||
+    row.storage_path === ""
+  ) {
+    return { status: "not-found" };
+  }
+
+  const kind = row.kind;
+  const contentType = isDocumentKind(kind)
+    ? KIND_CONTENT_TYPES[kind]
+    : "application/octet-stream";
+
+  try {
+    const downloaded = await downloadBytes(
+      db,
+      STUDY_BUCKET,
+      row.storage_path,
+    );
+
+    return {
+      status: "ok",
+      bytes: downloaded.bytes,
+      contentType,
+      fileName:
+        typeof row.name === "string" && row.name !== ""
+          ? row.name
+          : "dokument",
+    };
   } catch (error) {
     // Record exists but bytes were never uploaded (e.g. interrupted
     // upload): surface 404, not a generic 400, so the UI can say so.
-    if (
-      error instanceof SupabaseHttpError &&
-      error.message === "Object not found"
-    ) {
+    if (isMissingObject(error)) {
       throw new Error("OBJECT_NOT_FOUND");
     }
 

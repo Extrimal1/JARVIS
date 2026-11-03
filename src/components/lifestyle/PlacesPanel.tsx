@@ -34,6 +34,7 @@ import {
   type GeoPoint,
   type PlaceSearch,
 } from "@/src/lib/lifestyle/providers";
+import { detectPlaceCategory } from "@/src/lib/lifestyle/intent";
 
 type SortKey = "name" | "newest" | "distance";
 
@@ -86,6 +87,7 @@ export function PlacesPanel({
   savedIds,
   onToggleSave,
   center,
+  radiusKm = null,
 }: {
   places: Place[];
   loading: boolean;
@@ -97,6 +99,8 @@ export function PlacesPanel({
   savedIds: string[];
   onToggleSave: (id: string) => void;
   center: GeoPoint | null;
+  /** Search radius from the preferences; null disables the filter. */
+  radiusKm?: number | null;
 }) {
   const [query, setQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<"all" | PlaceCategory>(
@@ -108,7 +112,11 @@ export function PlacesPanel({
   const [sort, setSort] = useState<SortKey>("name");
   const [editing, setEditing] = useState<"new" | string | null>(null);
   const [name, setName] = useState("");
-  const [category, setCategory] = useState<PlaceCategory>("nature");
+  // Generic bucket until openNew/openEdit set an explicit value; the
+  // initial state is never shown without one of them running first.
+  const [category, setCategory] = useState<PlaceCategory>("culture");
+  /** True once the user picked a category by hand in this form. */
+  const [categoryTouched, setCategoryTouched] = useState(false);
   const [address, setAddress] = useState("");
   const [latitude, setLatitude] = useState("");
   const [longitude, setLongitude] = useState("");
@@ -134,8 +142,8 @@ export function PlacesPanel({
       maxCostCents,
       setting: settingFilter,
       freeOnly,
-      center: null,
-      radiusKm: null,
+      center,
+      radiusKm,
     };
     const filtered = filterPlaces(places, search);
 
@@ -159,12 +167,23 @@ export function PlacesPanel({
     }
 
     return filtered;
-  }, [places, query, categoryFilter, settingFilter, freeOnly, maxCost, sort, center]);
+  }, [places, query, categoryFilter, settingFilter, freeOnly, maxCost, sort, center, radiusKm]);
 
   function openNew() {
     setEditing("new");
     setName("");
-    setCategory(categoryFilter === "all" ? "nature" : categoryFilter);
+    // Explicit filter wins; otherwise detect from the filter text;
+    // ambiguous input keeps the last explicit pick — never a forced
+    // `nature`.
+    const detected = detectPlaceCategory(query);
+
+    if (categoryFilter !== "all") {
+      setCategory(categoryFilter);
+    } else if (detected !== "all") {
+      setCategory(detected);
+    }
+
+    setCategoryTouched(false);
     setAddress("");
     setLatitude("");
     setLongitude("");
@@ -181,6 +200,7 @@ export function PlacesPanel({
     setEditing(place.id);
     setName(place.name);
     setCategory(place.category);
+    setCategoryTouched(true);
     setAddress(place.address);
     setLatitude(place.latitude === null ? "" : String(place.latitude));
     setLongitude(place.longitude === null ? "" : String(place.longitude));
@@ -319,6 +339,13 @@ export function PlacesPanel({
             </p>
             <p className="mt-2 text-xs text-cyan-300">
               {places.length} {places.length === 1 ? "Eintrag" : "Einträge"}
+              {center !== null && radiusKm !== null && (
+                <span className="text-slate-500">
+                  {" "}
+                  · Umkreis {radiusKm} km aktiv (Orte ohne Koordinaten
+                  bleiben sichtbar)
+                </span>
+              )}
             </p>
           </div>
         </div>
@@ -446,8 +473,18 @@ export function PlacesPanel({
                     autoFocus
                     value={name}
                     onChange={(change) => {
-                      setName(change.target.value);
+                      const next = change.target.value;
+                      setName(next);
                       setFormError(null);
+
+                      // Auto-suggest the category from the name until
+                      // the user picks one by hand ("Kino" → cinema,
+                      // never a forced `nature`).
+                      if (!categoryTouched) {
+                        const detected = detectPlaceCategory(next);
+
+                        if (detected !== "all") setCategory(detected);
+                      }
                     }}
                     placeholder="z. B. Lieblingscafé am Park"
                     maxLength={120}
@@ -459,9 +496,10 @@ export function PlacesPanel({
                   Kategorie
                   <select
                     value={category}
-                    onChange={(change) =>
-                      setCategory(change.target.value as PlaceCategory)
-                    }
+                    onChange={(change) => {
+                      setCategory(change.target.value as PlaceCategory);
+                      setCategoryTouched(true);
+                    }}
                     className="mt-2 w-full rounded-xl border border-white/10 bg-[#111827] px-3 py-2.5 text-sm text-white outline-none focus:border-cyan-300/50"
                   >
                     {PLACE_CATEGORIES.map((item) => (

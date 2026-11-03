@@ -9,6 +9,7 @@ import {
   BookOpen,
   Brain,
   CalendarDays,
+  ChevronDown,
   Command,
   Compass,
   LogOut,
@@ -20,10 +21,34 @@ import {
 } from "lucide-react";
 import { useLockBodyScroll } from "@/src/hooks/useLockBodyScroll";
 
-const links = [
+type NavChild = { href: string; label: string };
+
+type NavEntry = {
+  href: string;
+  label: string;
+  icon: React.ElementType;
+  children?: NavChild[];
+};
+
+const STUDY_CHILDREN: NavChild[] = [
+  { href: "/study", label: "Übersicht" },
+  { href: "/study?tab=documents", label: "Dokumente" },
+  { href: "/study?tab=prep", label: "Prüfungsvorbereitung" },
+  { href: "/study?tab=prep&prep=exams", label: "Meine Prüfungen" },
+  { href: "/study?tab=prep&prep=topics", label: "Themen" },
+  { href: "/study?tab=prep&prep=plan", label: "Lernplan" },
+  { href: "/study?tab=prep&prep=progress", label: "Fortschritt" },
+];
+
+const links: NavEntry[] = [
   { href: "/", label: "Übersicht", icon: Activity },
   { href: "/assistant", label: "Assistent", icon: Sparkles },
-  { href: "/study", label: "Studium & Wissen", icon: BookOpen },
+  {
+    href: "/study",
+    label: "Studium & Wissen",
+    icon: BookOpen,
+    children: STUDY_CHILDREN,
+  },
   { href: "/calendar", label: "Terminplaner", icon: CalendarDays },
   { href: "/finance", label: "Finanzen", icon: Wallet },
   { href: "/lifestyle", label: "Freizeit", icon: Compass },
@@ -55,26 +80,79 @@ function NavLinks({
   isActive: (href: string) => boolean;
   onNavigate?: () => void;
 }) {
+  const [studyOpen, setStudyOpen] = useState(() => isActive("/study"));
+
   return (
     <>
-      {links.map(({ href, label, icon: Icon }) => {
+      {links.map(({ href, label, icon: Icon, children }) => {
         const active = isActive(href);
 
+        if (children === undefined) {
+          return (
+            <Link
+              key={href}
+              href={href}
+              onClick={onNavigate}
+              aria-current={active ? "page" : undefined}
+              className={`relative flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm transition ${
+                active
+                  ? "jarvis-nav-active border border-cyan-300/10 bg-cyan-300/10 text-cyan-200"
+                  : "text-slate-400 hover:bg-white/[0.04] hover:text-white"
+              }`}
+            >
+              <Icon size={18} />
+              {label}
+            </Link>
+          );
+        }
+
         return (
-          <Link
-            key={href}
-            href={href}
-            onClick={onNavigate}
-            aria-current={active ? "page" : undefined}
-            className={`relative flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm transition ${
-              active
-                ? "jarvis-nav-active border border-cyan-300/10 bg-cyan-300/10 text-cyan-200"
-                : "text-slate-400 hover:bg-white/[0.04] hover:text-white"
-            }`}
-          >
-            <Icon size={18} />
-            {label}
-          </Link>
+          <div key={href}>
+            <div
+              className={`relative flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm transition ${
+                active
+                  ? "jarvis-nav-active border border-cyan-300/10 bg-cyan-300/10 text-cyan-200"
+                  : "text-slate-400 hover:bg-white/[0.04] hover:text-white"
+              }`}
+            >
+              <Link
+                href={href}
+                onClick={onNavigate}
+                aria-current={active ? "page" : undefined}
+                className="flex min-w-0 flex-1 items-center gap-3"
+              >
+                <Icon size={18} />
+                <span className="truncate">{label}</span>
+              </Link>
+              <button
+                onClick={() => setStudyOpen((open) => !open)}
+                aria-expanded={studyOpen}
+                aria-label="Studium-Untermenü umschalten"
+                className="rounded-lg p-1 text-slate-400 transition hover:bg-white/10 hover:text-white"
+              >
+                <ChevronDown
+                  size={16}
+                  className={`transition-transform ${studyOpen ? "rotate-180" : ""}`}
+                />
+              </button>
+            </div>
+
+            {studyOpen && (
+              <ul aria-label={`${label} Untermenü`} className="ml-5 mt-1 space-y-0.5 border-l border-white/10 pl-3">
+                {children.map((child) => (
+                  <li key={child.href}>
+                    <Link
+                      href={child.href}
+                      onClick={onNavigate}
+                      className="block rounded-lg px-2 py-1.5 text-[13px] text-slate-400 transition hover:bg-white/[0.04] hover:text-white"
+                    >
+                      {child.label}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         );
       })}
     </>
@@ -139,7 +217,9 @@ function StatusCard() {
       </div>
 
       <p className="mt-2 text-xs leading-5 text-slate-500">
-        Oberfläche bereit. KI-Dienste sind noch nicht verbunden.
+        {CLOUD_ENABLED
+          ? "Cloud-Synchronisierung aktiv."
+          : "Lokal-first: deine Daten bleiben in diesem Browser."}
       </p>
     </div>
   );

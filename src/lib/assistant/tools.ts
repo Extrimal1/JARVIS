@@ -30,6 +30,12 @@ import {
   isMemoryEntryList,
   type MemoryEntry,
 } from "@/src/lib/memory";
+import {
+  isLectureSessionList,
+  isLocalRecordingList,
+  type LectureSession,
+  type LocalRecording,
+} from "@/src/lib/lecture/types";
 
 /**
  * Local-only assistant tools (read-only in this phase).
@@ -678,6 +684,60 @@ export function getFinanceSummary(input: {
   return getFinanceMonthSummary({ finance: input.finance, monthKey });
 }
 
+export type LectureOverview = {
+  sessionCount: number;
+  recordingCount: number;
+  /** Successfully stored recordings only (no in-progress/failed). */
+  savedCount: number;
+  failedCount: number;
+  totalDurationSeconds: number;
+  sessions: LectureSession[];
+  /** Newest recordings first (max 10); metadata only, never audio. */
+  recent: LocalRecording[];
+};
+
+/**
+ * Local lecture library overview: sessions plus recording metadata.
+ * No audio, no transcripts here — only counts and descriptors the
+ * lecture page could already display.
+ */
+export function getLectureOverview(input: {
+  sessions: unknown;
+  recordings: unknown;
+}): ToolResult<LectureOverview> {
+  if (!isLectureSessionList(input.sessions)) {
+    return { ok: false, error: invalidInput("getLectureOverview") };
+  }
+
+  if (!isLocalRecordingList(input.recordings)) {
+    return { ok: false, error: invalidInput("getLectureOverview") };
+  }
+
+  const recent = [...input.recordings]
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 10);
+
+  return {
+    ok: true,
+    data: {
+      sessionCount: input.sessions.length,
+      recordingCount: input.recordings.length,
+      savedCount: input.recordings.filter(
+        (recording) => recording.status === "saved_locally",
+      ).length,
+      failedCount: input.recordings.filter(
+        (recording) => recording.status === "failed",
+      ).length,
+      totalDurationSeconds: input.recordings.reduce(
+        (sum, recording) => sum + Math.max(0, recording.durationSeconds),
+        0,
+      ),
+      sessions: input.sessions,
+      recent,
+    },
+  };
+}
+
 // ------------------------------------------------------------ study intel
 // Server/IDB-backed tools: unlike the sync tools above, these run
 // through `AgentOptions.asyncReads` (the caller fetches owned data
@@ -710,3 +770,84 @@ export type StudyRetrieval = {
   totalCandidates: number;
   terms: string[];
 };
+
+// ------------------------------------------------------- daily briefing
+// One composite read for "Tagesbriefing / was steht heute an": today’s
+// events, open tasks, study deadlines, and the current month’s finance
+// summary — composed ONLY from the caller’s loaded data through the
+// same validated tools the single-purpose reads use. No module is
+// guessed: when any input is missing or corrupt the whole read fails
+// and names the broken modules, so the caller can fall back to the
+// single-purpose reads. Never mock data, never invented values.
+
+export type BriefingToday = {
+  todayISO: string;
+  today: TodayEvents;
+  tasks: OpenTasks;
+  deadlines: StudyDeadlines;
+  finance: FinanceMonthSummary;
+};
+
+export function getBriefingToday(input: {
+  events: unknown;
+  tasks: unknown;
+  study: unknown;
+  finance: unknown;
+  todayISO: string | null;
+  nowTime: string | null;
+}): ToolResult<BriefingToday> {
+  if (input.todayISO === null) {
+    return {
+      ok: false,
+      error: toolError("missing-date", "getBriefingToday: kein Datum verfügbar."),
+    };
+  }
+
+  const todayISO = input.todayISO;
+  const unavailable: { module: string; message: string }[] = [];
+
+  const today = getTodayEvents({ events: input.events, todayISO });
+  const tasks = getOpenTasks({ tasks: input.tasks, nowTime: input.nowTime });
+  const deadlines = getStudyDeadlines({ study: input.study, todayISO });
+  const finance = getFinanceSummary({
+    finance: input.finance,
+    todayISO,
+  });
+
+  if (!today.ok) {
+    unavailable.push({ module: "calendar", message: today.error.message });
+  }
+
+  if (!tasks.ok) {
+    unavailable.push({ module: "tasks", message: tasks.error.message });
+  }
+
+  if (!deadlines.ok) {
+    unavailable.push({ module: "study", message: deadlines.error.message });
+  }
+
+  if (!finance.ok) {
+    unavailable.push({ module: "finance", message: finance.error.message });
+  }
+
+  if (!today.ok || !tasks.ok || !deadlines.ok || !finance.ok) {
+    return {
+      ok: false,
+      error: toolError(
+        "invalid-input",
+        `getBriefingToday: unvollständige Daten (${unavailable.map((entry) => entry.module).join(", ")}).`,
+      ),
+    };
+  }
+
+  return {
+    ok: true,
+    data: {
+      todayISO,
+      today: today.data,
+      tasks: tasks.data,
+      deadlines: deadlines.data,
+      finance: finance.data,
+    },
+  };
+}

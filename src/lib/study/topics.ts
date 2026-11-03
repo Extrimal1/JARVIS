@@ -263,6 +263,41 @@ function formulaList(value: unknown): ExtractedFormula[] {
 }
 
 /**
+ * Tolerant ref items: strings as-is, bare numbers as 1-based
+ * source markers ([Qn]). Anything else is ignored — tolerant
+ * input, strict grounding (validated below, never invented).
+ */
+function refItems(refs: unknown): string[] {
+  if (typeof refs === "string") {
+    const trimmed = refs.trim();
+
+    return trimmed === "" ? [] : [trimmed];
+  }
+
+  if (typeof refs === "number") {
+    return Number.isInteger(refs) && refs > 0 ? [`[Q${refs}]`] : [];
+  }
+
+  if (!Array.isArray(refs)) return [];
+
+  const out: string[] = [];
+
+  for (const entry of refs) {
+    if (typeof entry === "string" && entry.trim() !== "") {
+      out.push(entry.trim());
+    } else if (
+      typeof entry === "number" &&
+      Number.isInteger(entry) &&
+      entry > 0
+    ) {
+      out.push(`[Q${entry}]`);
+    }
+  }
+
+  return out;
+}
+
+/**
  * Resolves marker refs ([Q1]) or verbatim labels to validated
  * source labels. Unknown markers and labels outside the usable
  * units are dropped — never invented.
@@ -277,7 +312,7 @@ function resolveTopicRefs(
   );
   const out: string[] = [];
 
-  for (const ref of stringList(refs)) {
+  for (const ref of refItems(refs)) {
     const bracketed = /^\[Q(\d+)\]$/.exec(ref);
     const label =
       bracketed !== null
@@ -328,7 +363,10 @@ export function parseTopicExtraction(
       continue;
     }
 
-    const refs = resolveTopicRefs(record.refs, sources, usable);
+    // Tolerant key: models sometimes emit references/ref/sources.
+    const rawRefs =
+      record.refs ?? record.references ?? record.ref ?? record.sources;
+    const refs = resolveTopicRefs(rawRefs, sources, usable);
 
     if (refs.length === 0) {
       droppedUngrounded += 1;
@@ -494,12 +532,16 @@ function topicDataOf(entry: Entry): {
   formulas: { text: string; variables: string[] }[];
   examples: string[];
   prerequisites: string[];
+  priority?: "high" | "normal" | "low";
 } {
   return {
     concepts: entry.topicData?.concepts ?? [],
     formulas: entry.topicData?.formulas ?? [],
     examples: entry.topicData?.examples ?? [],
     prerequisites: entry.topicData?.prerequisites ?? [],
+    ...(entry.topicData?.priority === undefined
+      ? {}
+      : { priority: entry.topicData.priority }),
   };
 }
 
@@ -604,6 +646,8 @@ export function mergeExtractedTopics(
       formulas: unionFormulas(data.formulas, topic.formulas),
       examples: unionStrings(data.examples, topic.examples),
       prerequisites: unionStrings(data.prerequisites, topic.prerequisites),
+      // User-set priority survives extraction merges.
+      ...(data.priority === undefined ? {} : { priority: data.priority }),
     };
     merged += 1;
   }
@@ -752,6 +796,10 @@ export function mergeTopicsManual(
       (all, entry) => unionStrings(all, topicDataOf(entry).prerequisites),
       [...survivorData.prerequisites],
     ),
+    // Survivor priority wins; losers never downgrade it.
+    ...(survivorData.priority === undefined
+      ? {}
+      : { priority: survivorData.priority }),
   };
 
   const next = entries

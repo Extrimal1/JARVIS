@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
-  BookOpen,
+  Bell,
   Brain,
   CalendarDays,
   Check,
@@ -13,10 +13,12 @@ import {
   ListTodo,
   Mic,
   Plus,
+  Repeat,
   Sparkles,
   Sunrise,
   Trash2,
   Wallet,
+  Zap,
 } from "lucide-react";
 import Link from "next/link";
 import Sidebar from "@/src/components/Sidebar";
@@ -39,12 +41,18 @@ import { type Task } from "@/src/lib/tasks";
 import { createId } from "@/src/lib/ids";
 import { buildAssistantContext } from "@/src/lib/assistant/context";
 import {
+  buildNotifications,
+  dueReviews,
+} from "@/src/lib/dashboard";
+import { isMemoryEnabledClient } from "@/src/lib/memory";
+import {
   useCalendarEvents,
   useFinance,
   useMemory,
   usePlans,
   usePlaces,
   usePrefs,
+  useQuiz,
   useSavedIds,
   useStudy,
   useTasks,
@@ -110,6 +118,23 @@ export default function Home() {
   const memoryStore = useMemory();
   const memory = memoryStore.items;
   const memoryLoaded = !memoryStore.loading;
+  const quizStore = useQuiz();
+  const quiz = quizStore.items;
+  const quizLoaded = !quizStore.loading;
+  const [memoryEnabled, setMemoryEnabled] = useState(true);
+
+  useEffect(() => {
+    // Mount-gated: prerendered HTML must not depend on localStorage.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMemoryEnabled(isMemoryEnabledClient());
+  }, []);
+
+  // Kill-switch (Memory page): disabled = dashboard behaves as if no
+  // entries exist. Nothing is deleted; the toggle explains itself.
+  const effectiveMemory = useMemo(
+    () => (memoryEnabled ? memory : []),
+    [memoryEnabled, memory],
+  );
 
   const context = useMemo(() => {
     if (today === null) return null;
@@ -129,7 +154,7 @@ export default function Home() {
       savedIds,
       plans,
       prefs,
-      memory,
+      memory: effectiveMemory,
       loaded: {
         tasks: tasksLoaded,
         events: eventsLoaded,
@@ -150,7 +175,7 @@ export default function Home() {
     savedIds,
     plans,
     prefs,
-    memory,
+    effectiveMemory,
     tasksLoaded,
     eventsLoaded,
     studyLoaded,
@@ -178,6 +203,43 @@ export default function Home() {
   const financeIncome = financeSummary?.incomeCents ?? 0;
   const financeSpent = financeSummary?.expenseCents ?? 0;
   const financeTxCount = financeSummary?.txCount ?? 0;
+  const dueQuestions =
+    today === null || !quizLoaded ? null : dueReviews(quiz, today);
+  const notifications = useMemo(
+    () =>
+      today === null
+        ? []
+        : buildNotifications({
+            todayISO: today,
+            tasks,
+            events,
+            deadlines: deadlines ?? [],
+            finance,
+            financeExpenseCents: financeSpent,
+            questions: quiz,
+            loaded: {
+              tasks: tasksLoaded,
+              events: eventsLoaded,
+              study: studyLoaded,
+              finance: financeLoaded,
+              quiz: quizLoaded,
+            },
+          }),
+    [
+      today,
+      tasks,
+      events,
+      deadlines,
+      finance,
+      financeSpent,
+      quiz,
+      tasksLoaded,
+      eventsLoaded,
+      studyLoaded,
+      financeLoaded,
+      quizLoaded,
+    ],
+  );
   const [greeting, setGreeting] = useState("Willkommen.");
   const [currentTime, setCurrentTime] = useState("");
   const [showTaskForm, setShowTaskForm] = useState(false);
@@ -830,42 +892,184 @@ const [newTaskPriority, setNewTaskPriority] =
               </div>
             </section>
 
-            <section className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6">
-              <h2 className="font-semibold">Systemmodule</h2>
+            <div className="space-y-5">
+              <section
+                aria-label="Schnellzugriff"
+                className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6"
+              >
+                <h2 className="flex items-center gap-2 font-semibold">
+                  <Zap size={18} className="text-cyan-300" />
+                  Schnellzugriff
+                </h2>
 
-              <p className="mt-1 text-xs text-slate-500">
-                Deine persönliche Kommandozentrale
-              </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Direkt einsteigen — mit echten Zählern aus deinen Daten
+                </p>
 
-              <div className="mt-5 space-y-3">
-                <Module
-                  icon={<BookOpen size={19} />}
-                  title="Smart Memory"
-                  detail="PDFs, Lernmaterialien und Prüfungsvorbereitung"
-                />
+                <div className="mt-5 grid gap-2 sm:grid-cols-2">
+                  <QuickAction
+                    href="#aufgaben"
+                    onClick={() => setShowTaskForm(true)}
+                    icon={<Plus size={17} />}
+                    title="Aufgabe anlegen"
+                    detail={
+                      tasksLoaded
+                        ? `${briefingTasks.length} offen`
+                        : "Wird geladen …"
+                    }
+                  />
+                  <QuickAction
+                    href="/calendar"
+                    icon={<CalendarDays size={17} />}
+                    title="Termin planen"
+                    detail={
+                      todaysEvents === null || !eventsLoaded
+                        ? "Wird geladen …"
+                        : `${todaysEvents.length} heute`
+                    }
+                  />
+                  <QuickAction
+                    href="/study?tab=prep&prep=exams"
+                    icon={<GraduationCap size={17} />}
+                    title="Prüfung anlegen"
+                    detail={
+                      deadlines === null || !studyLoaded
+                        ? "Wird geladen …"
+                        : `${deadlines.length} Deadlines`
+                    }
+                  />
+                  <QuickAction
+                    href="/finance"
+                    icon={<Wallet size={17} />}
+                    title="Ausgabe buchen"
+                    detail={
+                      !financeLoaded || today === null
+                        ? "Wird geladen …"
+                        : `${formatCents(financeSpent)} im ${financeMonthLabel}`
+                    }
+                  />
+                  <QuickAction
+                    href="/lecture"
+                    icon={<Mic size={17} />}
+                    title="Aufnahme starten"
+                    detail="Vorlesung mitschneiden"
+                  />
+                  <QuickAction
+                    href="/memory"
+                    icon={<Brain size={17} />}
+                    title="Erinnerung speichern"
+                    detail={
+                      !memoryLoaded
+                        ? "Wird geladen …"
+                        : !memoryEnabled
+                          ? "Gedächtnis pausiert"
+                          : `${memory.length} Einträge`
+                    }
+                  />
+                </div>
+              </section>
 
-                <Module
-                  icon={<CalendarDays size={19} />}
-                  title="Daily Briefing"
-                  detail="Tagesplanung, Termine und Erinnerungen"
-                />
+              <section
+                aria-label="Mitteilungen"
+                className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="flex items-center gap-2 font-semibold">
+                    <Bell size={18} className="text-cyan-300" />
+                    Mitteilungen
+                  </h2>
+                  <span className="text-xs tabular-nums text-slate-500">
+                    {notifications.length}
+                  </span>
+                </div>
 
-                <Module
-                  icon={<Wallet size={19} />}
-                  title="Financial Intelligence"
-                  detail="Ausgaben, Budget und Finanzanalysen"
-                />
-              </div>
+                {notifications.length === 0 ? (
+                  <p className="mt-3 text-sm text-slate-500">
+                    Keine Mitteilungen — alles im grünen Bereich.
+                  </p>
+                ) : (
+                  <ul className="mt-4 space-y-2.5">
+                    {notifications.map((notification) => (
+                      <li
+                        key={notification.id}
+                        className="flex items-start gap-2.5 text-sm"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
+                            notification.severity === "alert"
+                              ? "bg-rose-400"
+                              : notification.severity === "warning"
+                                ? "bg-amber-400"
+                                : "bg-cyan-300"
+                          }`}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <Link
+                            href={notification.href}
+                            className="text-slate-200 transition hover:text-cyan-200"
+                          >
+                            {notification.title}
+                          </Link>
+                          <span className="mt-0.5 block text-xs text-slate-500">
+                            {notification.detail}
+                          </span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
 
-              <p className="mt-5 text-xs leading-5 text-slate-600">
-                Früher Prototyp: KI-Funktionen und dauerhafte Datenspeicherung
-                werden schrittweise ergänzt.
-              </p>
-            </section>
+              <section
+                aria-label="Wiederholungen"
+                className="rounded-3xl border border-white/[0.08] bg-[#0d111b] p-6"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="flex items-center gap-2 font-semibold">
+                    <Repeat size={18} className="text-cyan-300" />
+                    Wiederholungen
+                  </h2>
+                  <Link
+                    href="/study?tab=prep&prep=progress"
+                    className="shrink-0 text-xs text-slate-500 transition hover:text-cyan-200"
+                  >
+                    Zum Fortschritt
+                  </Link>
+                </div>
+
+                {dueQuestions === null ? (
+                  <p className="mt-3 text-sm text-slate-500">
+                    Karteikarten werden geladen …
+                  </p>
+                ) : dueQuestions.length === 0 ? (
+                  <p className="mt-3 text-sm text-slate-500">
+                    {quiz.length === 0
+                      ? "Noch keine Karteikarten angelegt — lege in der Prüfungsvorbereitung deine ersten Fragen an."
+                      : "Nichts fällig. Stark!"}
+                  </p>
+                ) : (
+                  <div className="mt-3">
+                    <p className="text-3xl font-semibold tabular-nums text-cyan-200">
+                      {dueQuestions.length}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {dueQuestions.length === 1
+                        ? "Karteikarte fällig"
+                        : "Karteikarten fällig"}{" "}
+                      · {quiz.length} gesamt
+                    </p>
+                  </div>
+                )}
+              </section>
+            </div>
           </div>
 
           <footer className="py-8 text-center text-xs text-slate-600">
-            J.A.R.V.I.S. · Personal AI Workspace · Früher Prototyp
+            J.A.R.V.I.S. · Personal AI Workspace ·{" "}
+            {tasksStore.mode === "cloud"
+              ? "Cloud-Synchronisierung"
+              : "Lokale Speicherung"}
           </footer>
         </section>
       </div>
@@ -873,25 +1077,35 @@ const [newTaskPriority, setNewTaskPriority] =
   );
 }
 
-function Module({
+function QuickAction({
+  href,
+  onClick,
   icon,
   title,
   detail,
 }: {
+  href: string;
+  onClick?: () => void;
   icon: React.ReactNode;
   title: string;
   detail: string;
 }) {
   return (
-    <div className="flex items-center gap-3 rounded-2xl border border-white/[0.06] p-3">
+    <Link
+      href={href}
+      onClick={onClick}
+      className="jarvis-lift flex items-center gap-3 rounded-2xl border border-white/[0.06] p-3 transition hover:border-cyan-300/30 hover:bg-white/[0.03]"
+    >
       <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-cyan-300/[0.08] text-cyan-300">
         {icon}
       </div>
 
       <div className="min-w-0">
-        <p className="text-sm font-medium">{title}</p>
-        <p className="mt-1 text-xs leading-5 text-slate-500">{detail}</p>
+        <p className="truncate text-sm font-medium">{title}</p>
+        <p className="mt-1 truncate text-xs tabular-nums text-slate-500">
+          {detail}
+        </p>
       </div>
-    </div>
+    </Link>
   );
 }

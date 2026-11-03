@@ -27,6 +27,11 @@ export type ViewStep = {
   label: string;
   /** Null while the result is still missing (live turns). */
   ok: boolean | null;
+  /**
+   * Tool error message for failed steps (what failed and why), so a
+   * red ✗ is never unexplained. Null for successes and pending steps.
+   */
+  detail: string | null;
 };
 
 export type ViewTurn =
@@ -72,12 +77,29 @@ function parseClarifyOptions(value: unknown): ClarifyOption[] {
     .slice(0, 4);
 }
 
-function parseToolOk(raw: string): boolean | null {
+function parseToolResult(raw: string): {
+  ok: boolean | null;
+  detail: string | null;
+} {
   const parsed = parseEnvelope(raw);
 
-  if (parsed === null || typeof parsed.ok !== "boolean") return null;
+  if (parsed === null || typeof parsed.ok !== "boolean") {
+    return { ok: null, detail: null };
+  }
 
-  return parsed.ok;
+  if (parsed.ok) return { ok: true, detail: null };
+
+  const error = parsed.error;
+  const detail =
+    typeof error === "string"
+      ? error
+      : isRecord(error) && typeof error.message === "string"
+        ? error.message
+        : typeof parsed.gekürzt === "string"
+          ? parsed.gekürzt
+          : "Unbekannter Fehler.";
+
+  return { ok: false, detail };
 }
 
 export function transcriptToTurns(
@@ -129,6 +151,7 @@ export function transcriptToTurns(
           tool: envelope.tool,
           label: definition?.title ?? envelope.tool,
           ok: null,
+          detail: null,
         });
 
         continue;
@@ -163,7 +186,9 @@ export function transcriptToTurns(
       const pending = [...current.steps].reverse().find((step) => step.ok === null);
 
       if (pending !== undefined) {
-        pending.ok = parseToolOk(message.content);
+        const result = parseToolResult(message.content);
+        pending.ok = result.ok;
+        pending.detail = result.detail;
       }
     }
   }
@@ -174,7 +199,17 @@ export function transcriptToTurns(
 }
 
 /** Deep link for a turn's data, derived from executed tools only. */
-export function turnHref(steps: ViewStep[]): "/calendar" | "/finance" | "/study" | undefined {
+export function turnHref(
+  steps: ViewStep[],
+):
+  | "/calendar"
+  | "/finance"
+  | "/study"
+  | "/memory"
+  | "/lecture"
+  | "/lifestyle"
+  | "/#aufgaben"
+  | undefined {
   if (steps.some((step) => step.tool === "study.retrieve" || step.tool === "study.documents")) {
     return "/study";
   }
@@ -185,6 +220,22 @@ export function turnHref(steps: ViewStep[]): "/calendar" | "/finance" | "/study"
 
   if (steps.some((step) => step.tool.startsWith("finance."))) {
     return "/finance";
+  }
+
+  if (steps.some((step) => step.tool === "memory.create")) {
+    return "/memory";
+  }
+
+  if (steps.some((step) => step.tool.startsWith("lecture."))) {
+    return "/lecture";
+  }
+
+  if (steps.some((step) => step.tool.startsWith("lifestyle."))) {
+    return "/lifestyle";
+  }
+
+  if (steps.some((step) => step.tool === "tasks.create")) {
+    return "/#aufgaben";
   }
 
   return undefined;

@@ -6,6 +6,8 @@ import { ArrowLeft, Bookmark } from "lucide-react";
 import Sidebar from "@/src/components/Sidebar";
 import { DiscoveryPanel } from "@/src/components/lifestyle/DiscoveryPanel";
 import { EventsPanel } from "@/src/components/lifestyle/EventsPanel";
+import { NewsPanel } from "@/src/components/lifestyle/NewsPanel";
+import { PlaceDiscovery } from "@/src/components/lifestyle/PlaceDiscovery";
 import { PlacesPanel } from "@/src/components/lifestyle/PlacesPanel";
 import { PlannerPanel } from "@/src/components/lifestyle/PlannerPanel";
 import { PreferencesPanel } from "@/src/components/lifestyle/PreferencesPanel";
@@ -22,6 +24,8 @@ import {
   type Place,
 } from "@/src/lib/lifestyle/types";
 import type { GeoPoint } from "@/src/lib/lifestyle/providers";
+import { osmRefOfNotes } from "@/src/lib/lifestyle/placesSearch";
+import { createId } from "@/src/lib/ids";
 
 export default function LifestylePage() {
   const placesStore = usePlaces();
@@ -82,6 +86,39 @@ export default function LifestylePage() {
     await savedStore.unsave(id);
   }
 
+  /**
+   * Adopt a live OSM hit: live ids (`osm-…`) are client-only (the
+   * cloud table uses uuid keys), so the stored copy gets a fresh id
+   * while name/address/coordinates/source stay verbatim. Returns the
+   * stored id, or null when storing failed.
+   */
+  async function adoptLivePlace(live: Place): Promise<string | null> {
+    const ref = osmRefOfNotes(live.notes);
+    const existing =
+      ref === null
+        ? undefined
+        : places.find((place) => osmRefOfNotes(place.notes) === ref);
+
+    if (existing !== undefined) {
+      await savedStore.save(existing.id);
+      return existing.id;
+    }
+
+    const now = new Date().toISOString();
+    const result = await placesStore.create({
+      ...live,
+      id: createId(),
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    if (!result.ok) return null;
+
+    await savedStore.save(result.data.id);
+
+    return result.data.id;
+  }
+
   const savedPlaces = places.filter((place) => savedIds.includes(place.id));
   const mode = placesStore.mode;
 
@@ -107,9 +144,9 @@ export default function LifestylePage() {
             </h1>
 
             <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">
-              Orte entdecken, Veranstaltungen im Blick behalten und
-              Ausflüge planen – auf Basis deiner eigenen Einträge und
-              Vorlieben.
+              Orte entdecken, Veranstaltungen im Blick behalten,
+              Ausflüge planen und Nachrichten aus kostenlosen
+              RSS-Feeds lesen.
             </p>
           </header>
 
@@ -133,6 +170,16 @@ export default function LifestylePage() {
               savedIds={savedIds}
               onToggleSave={toggleSave}
             />
+
+            <PlaceDiscovery
+              prefs={prefs}
+              places={places}
+              savedIds={savedIds}
+              onAdoptLive={adoptLivePlace}
+              onToggleSave={toggleSave}
+            />
+
+            <NewsPanel />
 
             <section
               aria-label="Gemerkte Orte"
@@ -226,6 +273,7 @@ export default function LifestylePage() {
               savedIds={savedIds}
               onToggleSave={toggleSave}
               center={center}
+              radiusKm={prefs.radiusKm}
             />
 
             <EventsPanel />
@@ -256,10 +304,35 @@ export default function LifestylePage() {
                 </p>
                 <p>
                   <span className="font-medium text-slate-200">
+                    Aktiv: Kostenlose Nachrichten-Feeds (RSS).
+                  </span>{" "}
+                  Tagesschau, heise und Deutschlandfunk — ohne
+                  Anmeldung, ohne Kosten, serverseitig abgerufen und
+                  15 Minuten zwischengespeichert. Artikel werden nur
+                  verlinkt, Volltexte bleiben beim Anbieter. Ist ein
+                  Feed offline, zeigt die Ansicht eine ehrliche
+                  Fehlermeldung statt erfundener Nachrichten.
+                </p>
+                <p>
+                  <span className="font-medium text-slate-200">
+                    Aktiv: Live-Ortssuche über OpenStreetMap (Nominatim
+                    für Text, Overpass für die Kategorie-Umkreissuche).
+                  </span>{" "}
+                  Frei nutzbar im Fair-Use-Rahmen mit Quellenangabe,
+                  kein Schlüssel nötig. Die Suche läuft serverseitig
+                  (max. eine Anfrage pro Sekunde, 10 Minuten
+                  zwischengespeichert) und liefert echte Namen,
+                  Adressen und Koordinaten – Bewertungen, Preise und
+                  Verfügbarkeiten werden nicht erfunden und nicht
+                  dargestellt, Öffnungszeiten nur, wenn der Anbieter
+                  sie liefert (unbestätigt). Daten: ©
+                  OpenStreetMap-Mitwirkende (ODbL).
+                </p>
+                <p>
+                  <span className="font-medium text-slate-200">
                     Nicht konfiguriert:
                   </span>{" "}
-                  externe Orts- und Event-Anbieter. Es werden keine
-                  Geschäfte, Öffnungszeiten, Preise, Bewertungen oder
+                  externe Event-Anbieter. Es werden keine
                   Ticketverfügbarkeiten erfunden oder als live
                   dargestellt.
                 </p>
@@ -268,12 +341,6 @@ export default function LifestylePage() {
                     Mögliche Quellen für später (nicht angebunden):
                   </p>
                   <ul className="mt-1 list-disc space-y-1 pl-5">
-                    <li>
-                      OpenStreetMap (Nominatim-Suche, Overpass-API) –
-                      frei nutzbar im Fair-Use-Rahmen mit
-                      Quellenangabe, kein Schlüssel nötig. Geeignet für
-                      Adresssuche und Points of Interest.
-                    </li>
                     <li>
                       Kommerzielle Orts-APIs (z. B. Google Places,
                       Foursquare) – erfordern in der Regel

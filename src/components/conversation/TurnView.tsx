@@ -13,18 +13,23 @@ import type { ViewStep, ViewTurn } from "@/src/lib/assistant/transcript";
 
 function StepRow({ step }: { step: ViewStep }) {
   return (
-    <li className="flex items-center gap-1.5 text-xs text-slate-400">
+    <li className="flex items-start gap-1.5 text-xs text-slate-400">
       {step.ok === null ? (
         <span
           aria-hidden
-          className="inline-block h-3 w-3 rounded-full border border-slate-500"
+          className="mt-0.5 inline-block h-3 w-3 shrink-0 rounded-full border border-slate-500"
         />
       ) : step.ok ? (
-        <Check size={14} className="text-emerald-400" aria-label="Erfolgreich" />
+        <Check size={14} className="mt-0.5 shrink-0 text-emerald-400" aria-label="Erfolgreich" />
       ) : (
-        <X size={14} className="text-rose-400" aria-label="Fehlgeschlagen" />
+        <X size={14} className="mt-0.5 shrink-0 text-rose-400" aria-label="Fehlgeschlagen" />
       )}
-      <span>{step.label}</span>
+      <span>
+        {step.label}
+        {step.ok === false && step.detail !== null && (
+          <span className="block text-rose-300/90">{step.detail}</span>
+        )}
+      </span>
     </li>
   );
 }

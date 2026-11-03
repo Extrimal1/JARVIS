@@ -95,6 +95,7 @@ import {
   TOPIC_EXTRACT_NUM_PREDICT,
   TopicsParseError,
 } from "@/src/lib/study/topics";
+import { hasMeaningfulText } from "@/src/lib/study/autoTopics";
 import type { AssistantLocale } from "@/src/lib/assistant/actions";
 import type { LlmMessage } from "@/src/lib/assistant/llm";
 import { retrieveStudy } from "./studyRetrieval";
@@ -1247,10 +1248,38 @@ export async function extractDocumentTopics(
   }
 
   if (meta.extractionStatus !== "completed") {
+    if (meta.extractionStatus === "unsupported") {
+      throw new Error(
+        "Dieses Dokument enthält keinen extrahierbaren Text (z. B. eingescanntes PDF — dafür wäre OCR nötig, das es in dieser Version noch nicht gibt).",
+      );
+    }
+
+    if (meta.extractionStatus === "failed") {
+      throw new Error(
+        "Die Texterkennung dieses Dokuments ist fehlgeschlagen. Verarbeite es erneut, bevor du Themen extrahierst.",
+      );
+    }
+
     throw new Error("Das Dokument ist noch nicht verarbeitet.");
   }
 
   const stored = (await getDocumentChunks(id)) ?? [];
+
+  if (!hasMeaningfulText(stored)) {
+    return {
+      documentId: id,
+      documentName: meta.name,
+      spansDone: [],
+      skippedSpans: [],
+      topics: [],
+      droppedInvalid: 0,
+      droppedUngrounded: 0,
+      repaired: false,
+      insufficient: true,
+      done: true,
+    };
+  }
+
   const plan = planSummarySweep(
     stored.map((chunk) => ({
       index: chunk.index,

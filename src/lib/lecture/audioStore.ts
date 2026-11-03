@@ -7,6 +7,13 @@
  *
  * Chunks are written every few seconds while recording so an interrupted
  * recording (crash, closed tab) can be recovered from its chunks.
+ *
+ * Scope: this database lives on ONE device only. IndexedDB never syncs
+ * across devices — future cloud sync must go through the private
+ * Supabase Storage architecture (owner-scoped paths, signed URLs;
+ * see src/lib/supabase/storage.ts), never by assuming this store
+ * follows the user. DB_VERSION stays 1: no schema change, all
+ * existing recordings keep working untouched.
  */
 
 import {
@@ -209,6 +216,12 @@ export async function clearChunks(recordingId: string): Promise<void> {
 // --------------------------------------------------------------------- audio
 
 export async function saveAudio(id: string, blob: Blob): Promise<void> {
+  // Never persist a fake empty recording: callers mark the metadata
+  // failed instead, so no dead player is rendered for missing audio.
+  if (blob.size === 0) {
+    throw new Error("Leeres Audio wird nicht gespeichert.");
+  }
+
   await writeStore("audio", "readwrite", (objectStore) =>
     objectStore.put({ id, blob }),
   );
@@ -226,6 +239,8 @@ export async function getAudio(id: string): Promise<Blob | null> {
     );
 
     if (row === undefined || !(row.blob instanceof Blob)) return null;
+    // Legacy guard: a zero-byte row holds no audio, report it missing.
+    if (row.blob.size === 0) return null;
 
     return row.blob;
   } finally {

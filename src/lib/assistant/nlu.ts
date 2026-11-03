@@ -13,6 +13,10 @@
 import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from "@/src/lib/finance";
 import { suggestCategory } from "@/src/lib/finance/categories";
 import {
+  canonicalizeQuery,
+  detectPlaceCategory,
+} from "@/src/lib/lifestyle/intent";
+import {
   addDaysISO,
   mondayOfISO,
   weekdayOfISO,
@@ -1232,6 +1236,21 @@ const CLARIFY = {
       options: [],
     },
   },
+  note: {
+    de: { question: "Was soll ich mir merken?", options: [] },
+    ru: { question: "Что запомнить?", options: [] },
+  },
+  task: {
+    de: { question: "Wie lautet die Aufgabe?", options: [] },
+    ru: { question: "Какая задача?", options: [] },
+  },
+  query: {
+    de: {
+      question: "Wonach soll ich in deinen Unterlagen suchen?",
+      options: [],
+    },
+    ru: { question: "Что найти в твоих материалах?", options: [] },
+  },
 } satisfies Record<
   string,
   Record<AssistantLocale, { question: string; options: ClarifyOption[] }>
@@ -1782,6 +1801,374 @@ function endOfMonth(monthKey: string): string {
   return last.toISOString().slice(0, 10);
 }
 
+// ------------------------------------------------- memory + task writes
+
+const MEMORY_CREATE_SIGNAL =
+  /merk(e)?\s+dir|speicher(e)?(\s+dir)?|notier(e)?|behalt(e)?(\s+dir)?|запомни|сохрани/;
+
+const MEMORY_QUESTION_GUARD =
+  /^(was|welche|wen|hast\s+du)|hast\s+du|^(что|какие|кого)/;
+
+function memoryCategoryOf(lower: string): string {
+  if (/studium|lern|uni\b|prüfung|klausur|уч[её]б|экзамен/.test(lower)) {
+    return "study";
+  }
+
+  if (/geld|finanz|ausgab|budget|финанс|денег|бюджет/.test(lower)) {
+    return "finance";
+  }
+
+  if (/freizeit|urlaub|reise|hobby|отдых|путешеств|хобби/.test(lower)) {
+    return "lifestyle";
+  }
+
+  if (/ziel|vorsatz|wunsch|план|цель|желание/.test(lower)) return "goals";
+  if (/mag|liebe|vorliebe|präferenz|нравится|люблю/.test(lower)) {
+    return "preferences";
+  }
+
+  return "assistant";
+}
+
+function tryMemoryCreate(
+  lexer: Lexer,
+  locale: AssistantLocale,
+): AssistantPlan | null {
+  const lower = lexer.lower;
+
+  if (!MEMORY_CREATE_SIGNAL.test(lower)) return null;
+  if (MEMORY_QUESTION_GUARD.test(lower)) return null;
+
+  const trigger = /(merk(e)?\s+dir|speicher(e)?(\s+dir)?|notier(e)?|behalt(e)?(\s+dir)?|запомни|сохрани)\s*/.exec(lower);
+
+  if (trigger !== null) lexer.claimMatch(trigger);
+
+  const content = lexer
+    .remaining()
+    .replace(/^[,.:;\-–—„“"'\s]+/, "")
+    .trim();
+
+  if (content === "") return clarify("note", locale);
+
+  const firstSentence = content.split(/[.!?;]/)[0].trim();
+  const title = (firstSentence === "" ? content : firstSentence).slice(0, 120);
+
+  if (title === "") return clarify("note", locale);
+
+  return {
+    type: "memory.create",
+    entry: {
+      category: memoryCategoryOf(lower),
+      title,
+      content: content.slice(0, 2000),
+    },
+  };
+}
+
+const TASK_NOUN = /aufgabe|todo|задач/;
+
+const TASK_CREATE_SIGNAL =
+  /erstell|neu(e|er|es)?\s|mach\w*\s|füg\w*\s+(hinzu|an)|hinzufüg|hinzu|anleg|trag\w*\s+ein|erinner\w*\s+mich|todo\s*:|aufgabe\s*:|создай|создать|добавь|добавить|нов(ая|ую|ой)|напомни/;
+
+function tryTasksCreate(
+  lexer: Lexer,
+  locale: AssistantLocale,
+): AssistantPlan | null {
+  const lower = lexer.lower;
+
+  if (!TASK_NOUN.test(lower) && !/erinner\w*\s+mich|напомни/.test(lower)) {
+    return null;
+  }
+
+  if (!TASK_CREATE_SIGNAL.test(lower)) return null;
+
+  const priority: "Niedrig" | "Mittel" | "Hoch" =
+    /dringend|wichtig|priorit(ä|a)t\s+hoch|hochprior|sofort|срочн|важн/.test(lower)
+      ? "Hoch"
+      : /niedrig|unwichtig|später|low|не\s*важн|низк/.test(lower)
+        ? "Niedrig"
+        : "Mittel";
+
+  const timeMatch = /um\s+(\d{1,2}):(\d{2})/.exec(lower);
+
+  if (timeMatch !== null) lexer.claimMatch(timeMatch);
+
+  // Priority words describe the task; they must not leak into its title.
+  const priorityMatch =
+    /(dringend|wichtig|priorit(ä|a)t\s+hoch|hochprior|sofort|niedrig|unwichtig|später|low|срочн|важн|не\s*важн|низк)/g;
+  let priorityHit: RegExpExecArray | null;
+
+  while ((priorityHit = priorityMatch.exec(lower)) !== null) {
+    lexer.claimMatch(priorityHit);
+
+    if (priorityHit[0].length === 0) break;
+  }
+
+  const trigger =
+    /(erstell\w*|neue?\s+aufgabe|neue?\s+todo|neues?\s+todo|mach\w*|füg\w*\s+(hinzu|an)|hinzufüg\w*|hinzu|anleg\w*|trag\w*\s+ein|erinner\w*\s+mich|aufgabe|todo|создай|создать|добавь|добавить|нов(ая|ую|ой)\s+(задача|задачу)|задача|задачу|напомни)\s*/g;
+  let triggerMatch: RegExpExecArray | null;
+
+  while ((triggerMatch = trigger.exec(lower)) !== null) {
+    lexer.claimMatch(triggerMatch);
+
+    if (triggerMatch[0].length === 0) break;
+  }
+
+  const title = cleanTitle(lexer.remaining()).replace(/^:\s*/, "");
+
+  if (title === "") return clarify("task", locale);
+
+  return {
+    type: "tasks.create",
+    task: {
+      title: title.slice(0, 200),
+      time: timeMatch !== null ? `${timeMatch[1].padStart(2, "0")}:${timeMatch[2]}` : "Keine Frist",
+      priority,
+    },
+  };
+}
+
+// ------------------------------------------------------------ read intents
+
+const BRIEFING_SIGNAL =
+  /tagesbriefing|tagesübersicht|tagesuebersicht|tageszusammenfassung|tagesüberblick|was steht (heute |)an|mein tag|tagesstart|дайджест|что (у меня )?сегодня|мой день|что запланировано/;
+
+function tryBriefing(lexer: Lexer): AssistantPlan | null {
+  if (!BRIEFING_SIGNAL.test(lexer.lower)) return null;
+
+  return { type: "briefing.today" };
+}
+
+const TASKS_OPEN_SIGNAL =
+  /offen\w*\s+(aufgaben|todos)|meine\s+(aufgaben|todos)|aufgabenliste|aufgabenübersicht|alle\s+aufgaben|zeige.*aufgaben|aufgaben\s+(zeigen|anzeigen|auflisten)|was.*aufgaben|habe\s+ich.*aufgaben|открытые\s+задачи|мои\s+задачи|список\s+задач|какие\s+задачи|покажи.*задачи/;
+
+function tryTasksOpen(lexer: Lexer): AssistantPlan | null {
+  if (!TASKS_OPEN_SIGNAL.test(lexer.lower)) return null;
+
+  return { type: "tasks.open" };
+}
+
+const STUDY_NOUN =
+  /prüfung|klausur|examen|studium|lern|thema|themen|fach\b|fächer|vorlesung|uni\b|frist|abgabe|deadline|экзамен|уч[её]б|тем[аы]|предмет|лекци|дедлайн/;
+
+function tryStudyRead(
+  lexer: Lexer,
+  locale: AssistantLocale,
+): AssistantPlan | null {
+  void locale;
+  const lower = lexer.lower;
+
+  if (!STUDY_NOUN.test(lower)) return null;
+
+  if (/fortschritt|lernstand|прогресс|успеваем/.test(lower)) {
+    return { type: "study.progress" };
+  }
+
+  if (
+    /offene.*themen|themen.*offen|anstehend|открытые\s+темы|ближайшие\s+экзамены/.test(lower)
+  ) {
+    const daysMatch = /(\d{1,2})\s*(tagen|дн)/.exec(lower);
+    const withinDays =
+      daysMatch === null
+        ? undefined
+        : Math.max(0, Math.min(90, Number(daysMatch[1])));
+
+    return withinDays === undefined
+      ? { type: "study.attention" }
+      : { type: "study.attention", withinDays };
+  }
+
+  if (/prüfung|klausur|frist|examen|экзамен|дедлайн|срок/.test(lower)) {
+    return { type: "study.deadlines" };
+  }
+
+  // Bare study nouns answer only to list signals ("Themen" alone is
+  // not a question).
+  if (
+    /\?|zeig|liste|was\s|welche|übersicht|покажи|какие|что\s|список/.test(lower)
+  ) {
+    return { type: "study.progress" };
+  }
+
+  return null;
+}
+
+/**
+ * Shared intent detection (see `@/src/lib/lifestyle/intent`): the
+ * assistant detects the same categories as the live-search UI.
+ * Broad/ambiguous input yields no category arg (the search stays
+ * broad) — never a forced `nature`.
+ */
+function placeCategoryOf(lower: string): string | undefined {
+  const detected = detectPlaceCategory(lower);
+
+  return detected === "all" ? undefined : detected;
+}
+
+function tryLifestyleRead(
+  lexer: Lexer,
+  locale: AssistantLocale,
+): AssistantPlan | null {
+  const lower = lexer.lower;
+
+  if (
+    /gemerkt\w*\s+(orte|plätze)|gespeichert\w*\s+(orte|plätze)|meine\s+(orte|plätze)|сохран[её]нные\s+места|мои\s+места/.test(lower)
+  ) {
+    return { type: "lifestyle.saved" };
+  }
+
+  if (/ausflüge?|ausflugspläne?|поездки|путешествия/.test(lower)) {
+    return { type: "lifestyle.upcomingPlans" };
+  }
+
+  if (/vorlieben|präferenzen|предпочтения/.test(lower)) {
+    return { type: "lifestyle.preferences" };
+  }
+
+  const placeNoun =
+    /restaurant|caf[eé]|kinoabend|kino|film|museum|theater|konzert|park|spazier|wander|ausflug|ausflüg|freizeit|wochenende|hotel|pension|sehenswürdig|kneipe|fitness|\bgyms?\b|veranstaltung|\bevents?\b|einkauf|shopping|strand|\bbar\b|orte|plätze?|мест|ресторан|кафе|кино|музей|театр|парк|отел|достопримечател|фитнес|спортзал|поесть|погулять|куда\s+сходить|выходн|мероприяти/.test(lower);
+
+  if (!placeNoun) return null;
+
+  const searchVerb =
+    /such|finde|empfehl|zeig|gibt es|gib mir|wo\b|in der nähe|in meiner nähe|buch|reservier|wochenende|weekend|ideen?|vorschl[äa]ge?|unternehmen|was\s+(kann|gibt|tun|machen)|was\s+ist\s+los|geht\s+was|\bheute\b|\bmorgen\b|(?:^|\s)(?:in|bei|nahe)\s+[a-zäöüß]|найди|где|посоветуй|покажи|сегодня|завтра|выходн|\?/.test(lower);
+
+  if (!searchVerb) return null;
+
+  const raw = lexer.raw;
+  let near: string | undefined;
+
+  if (locale === "ru") {
+    // (^|\s), not \b: \b only sees ASCII word characters.
+    const nearMatch = /(?:^|\s)(?:в|во|около)\s+([А-ЯЁ][\wа-яё\-]{1,40})/.exec(raw);
+
+    if (nearMatch !== null) {
+      near = nearMatch[1];
+      lexer.claim(nearMatch.index, nearMatch.index + nearMatch[0].length);
+    }
+  } else {
+    const nearMatch = /\b(?:in|bei|nahe)\s+([A-ZÄÖÜ][\wäöüß\-]{1,40})/.exec(raw);
+
+    if (nearMatch !== null) {
+      near = nearMatch[1];
+      lexer.claim(nearMatch.index, nearMatch.index + nearMatch[0].length);
+    }
+  }
+
+  const limitMatch = /(\d{1,2})\s*(treffer|vorschläge|optionen|ergebnisse|вариант|мест)/.exec(lower);
+  const limit =
+    limitMatch === null
+      ? undefined
+      : Math.max(1, Math.min(10, Number(limitMatch[1])));
+
+  if (limitMatch !== null) lexer.claimMatch(limitMatch);
+
+  const trigger =
+    /(such\w*|finde\w*|empfehl\w*|zeig\w*|gibt es|gib mir|in meiner nähe|in der nähe|buch\w*|reservier\w*|was machen wir|was kann man|was gibt es|was ist los|geht was|wo ist|nächst\w*|\bheute\b|\bmorgen\b|orte|plätze?|найди|где|посоветуй|покажи|ближайш\w*|сегодня|завтра|мест[а-яё]*)\s*/g;
+  let triggerMatch: RegExpExecArray | null;
+
+  while ((triggerMatch = trigger.exec(lower)) !== null) {
+    lexer.claimMatch(triggerMatch);
+
+    if (triggerMatch[0].length === 0) break;
+  }
+
+  // Drop scaffolding words only when real content remains ("Kino am
+  // Wochenende" → "Kino"; a bare "Wochenende" stays the query; glue
+  // leftovers like "fürs" fall back to the original words).
+  let query = cleanTitle(lexer.remaining()).slice(0, 200);
+  const content = query
+    .replace(
+      /\b(wochenende|weekend|freizeit|ausflug|ausflüge|ideen?|vorschl[äa]ge?|unternehmen)\b/gi,
+      " ",
+    )
+    // (^|\s), not \b: \b only sees ASCII word characters.
+    .replace(/(^|\s)(выходн[а-яё]*|мероприяти[а-яё]*)(?=\s|$|[?!.,])/gi, "$1 ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^(am|im|in|bei|nahe)\s+|\s+(am|im|in|bei|nahe)$/gi, "")
+    .trim();
+  const contentSansGlue = content
+    .replace(
+      /\b(fürs|für|mit|zum|zur|vom|von|beim|am|im|in|bei|nahe|und|oder|der|die|das|den|dem|des)\b/gi,
+      " ",
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (contentSansGlue !== "") query = content;
+
+  query = canonicalizeQuery(query);
+  const category = placeCategoryOf(lower);
+  const args: {
+    query?: string;
+    near?: string;
+    category?: string;
+    limit?: number;
+  } = {};
+
+  if (query !== "") args.query = query;
+  if (near !== undefined) args.near = near;
+  if (category !== undefined) args.category = category;
+  if (limit !== undefined) args.limit = limit;
+
+  return { type: "lifestyle.placesSearch", ...args };
+}
+
+const MEMORY_READ_SIGNAL =
+  /was\s+weißt\s+du|was\s+hast\s+du\s+gespeichert|erinnerungen|notizen|was\s+ist\s+gespeichert|merkliste|zeige.*erinnerung|что\s+ты\s+(помнишь|знаешь)|напоминания|заметки/;
+
+function tryMemoryRead(lexer: Lexer): AssistantPlan | null {
+  if (!MEMORY_READ_SIGNAL.test(lexer.lower)) return null;
+
+  return { type: "memory.approved" };
+}
+
+const STUDY_DOCS_SIGNAL =
+  /welche\s+dokumente|dokumentenliste|dokumente\s+(zeigen|auflisten|anzeigen|liste)|alle\s+dokumente|hochgeladene|какие\s+документы|список\s+документ|мои\s+документы|загруженные/;
+
+const STUDY_RETRIEVE_SIGNAL =
+  /suche\s+in\s+(den\s+)?unterlagen|durchsuche|was\s+steht\s+in|finde\s+in|in\s+den\s+unterlagen|найди\s+в|поиск\s+по\s+документ|что\s+говорится\s+в/;
+
+function tryStudyDocs(
+  lexer: Lexer,
+  locale: AssistantLocale,
+): AssistantPlan | null {
+  const lower = lexer.lower;
+
+  if (STUDY_DOCS_SIGNAL.test(lower)) {
+    return { type: "study.documents" };
+  }
+
+  if (!STUDY_RETRIEVE_SIGNAL.test(lower)) return null;
+
+  const trigger =
+    /(suche\s+in\s+(den\s+)?unterlagen|durchsuche\w*|was\s+steht\s+in|finde\s+in|in\s+den\s+unterlagen|найди\s+в|поиск\s+по\s+документ\w*|что\s+говорится\s+в)\s*/.exec(lower);
+
+  if (trigger !== null) lexer.claimMatch(trigger);
+
+  const query = cleanTitle(lexer.remaining())
+    .replace(/^(nach|zu|über|ueber|für|von|про|о)\s+/i, "")
+    .slice(0, 500);
+
+  if (query === "") return clarify("query", locale);
+
+  return { type: "study.retrieve", query };
+}
+
+function tryLecture(lexer: Lexer): AssistantPlan | null {
+  const lower = lexer.lower;
+
+  if (!/aufnahme|aufzeichnung|mitschnitt|vorlesungsaufzeichnung|запис/.test(lower)) {
+    return null;
+  }
+
+  // Recording actions are not listing the library.
+  if (/aufnehmen|nimm.*auf|starte|start|запиши/.test(lower)) return null;
+
+  return { type: "lecture.overview" };
+}
+
 /**
  * Parse one command into a validated plan. Never throws for
  * unparseable input — that becomes `clarify` or `unsupported`.
@@ -1812,13 +2199,22 @@ export function parseCommand(text: string, ctx: NluContext): ParseResult {
   const locale = detectLocale(source, ctx.locale);
 
   const plan =
+    tryMemoryCreate(new Lexer(source), locale) ??
+    tryTasksCreate(new Lexer(source), locale) ??
     tryFinanceCreate(new Lexer(source), ctx, locale) ??
     tryCalendarDelete(new Lexer(source), locale) ??
     tryCalendarUpdate(new Lexer(source), ctx, locale) ??
     tryCalendarCreate(new Lexer(source), ctx, locale) ??
+    tryBriefing(new Lexer(source)) ??
     tryCalendarList(new Lexer(source), ctx, locale) ??
+    tryTasksOpen(new Lexer(source)) ??
+    tryStudyRead(new Lexer(source), locale) ??
     tryFinanceList(new Lexer(source), locale) ??
-    tryFinanceSummary(new Lexer(source), ctx, locale);
+    tryFinanceSummary(new Lexer(source), ctx, locale) ??
+    tryLifestyleRead(new Lexer(source), locale) ??
+    tryMemoryRead(new Lexer(source)) ??
+    tryStudyDocs(new Lexer(source), locale) ??
+    tryLecture(new Lexer(source));
 
   if (plan !== null) {
     return { plan, locale };

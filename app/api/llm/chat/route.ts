@@ -45,6 +45,14 @@ async function handlePost(request: NextRequest) {
       );
     }
 
+    // Opt-in inference diagnostics: metadata only (model, finish
+    // reason, token count, sizes) — never prompts, never content.
+    if (process.env.LLM_DEBUG === "1") {
+      console.log(
+        `[api:llm] chat model=${result.model} done=${result.doneReason ?? "?"} eval=${result.evalCount ?? "?"} outChars=${result.content.length} msgs=${body.messages.length}`,
+      );
+    }
+
     return ok({
       content: result.content,
       model: result.model,

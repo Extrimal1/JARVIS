@@ -197,12 +197,56 @@ export type NewTransactionFields = {
   note: string;
 };
 
+export type NewMemoryFields = {
+  category: string;
+  title: string;
+  content: string;
+};
+
+export type NewTaskFields = {
+  title: string;
+  /** Free-form time label (HH:MM or "Keine Frist"). */
+  time: string;
+  priority: "Niedrig" | "Mittel" | "Hoch";
+};
+
 export type ClarifyOption = {
   /** Button label shown to the user. */
   label: string;
   /** Follow-up fragment; appended to the original text on re-submit. */
   text: string;
 };
+
+/**
+ * Read-only query plans: NLU output that the AGENT LOOP executes as a
+ * read tool (never the executor). Each `type` is a registry read-tool
+ * id, so the heuristic adapter forwards `{type, ...args}` verbatim as
+ * `{"tool": type, "args"}` and the loop validates args + requiresKeys
+ * before running. No SQL, no shell, no arbitrary execution — queries
+ * only name a registry tool with bounded params.
+ */
+export type AssistantQuery =
+  | { type: "briefing.today" }
+  | { type: "calendar.today" }
+  | { type: "calendar.upcoming"; days?: number }
+  | { type: "tasks.open" }
+  | { type: "study.deadlines" }
+  | { type: "study.progress" }
+  | { type: "study.attention"; withinDays?: number }
+  | { type: "lifestyle.preferences" }
+  | { type: "lifestyle.saved" }
+  | { type: "lifestyle.upcomingPlans" }
+  | {
+      type: "lifestyle.placesSearch";
+      query?: string;
+      near?: string;
+      category?: string;
+      limit?: number;
+    }
+  | { type: "memory.approved" }
+  | { type: "study.documents" }
+  | { type: "study.retrieve"; query: string; documentId?: string; limit?: number }
+  | { type: "lecture.overview" };
 
 /**
  * Validated NLU output. `calendar.update` / `calendar.delete` carry
@@ -224,8 +268,11 @@ export type AssistantPlan =
       category: string | null;
       label: string;
     }
+  | { type: "memory.create"; entry: NewMemoryFields }
+  | { type: "tasks.create"; task: NewTaskFields }
   | { type: "clarify"; question: string; options: ClarifyOption[] }
-  | { type: "unsupported"; message: string };
+  | { type: "unsupported"; message: string }
+  | AssistantQuery;
 
 function isEventType(value: unknown): value is CalendarPlanType {
   return value === "lecture" || value === "exam" || value === "personal";
@@ -325,6 +372,43 @@ function isNewTransactionFields(
   );
 }
 
+const MEMORY_PLAN_CATEGORIES = [
+  "preferences",
+  "goals",
+  "study",
+  "finance",
+  "lifestyle",
+  "assistant",
+] as const;
+
+function isNewMemoryFields(value: unknown): value is NewMemoryFields {
+  if (!isRecord(value)) return false;
+
+  return (
+    typeof value.category === "string" &&
+    (MEMORY_PLAN_CATEGORIES as readonly string[]).includes(value.category) &&
+    isShortText(value.title, 120) &&
+    typeof value.content === "string" &&
+    value.content.trim().length > 0 &&
+    value.content.length <= 2000
+  );
+}
+
+const TASK_PRIORITIES = ["Niedrig", "Mittel", "Hoch"] as const;
+
+function isNewTaskFields(value: unknown): value is NewTaskFields {
+  if (!isRecord(value)) return false;
+
+  return (
+    isShortText(value.title, 200) &&
+    typeof value.time === "string" &&
+    value.time.length > 0 &&
+    value.time.length <= 64 &&
+    typeof value.priority === "string" &&
+    (TASK_PRIORITIES as readonly string[]).includes(value.priority)
+  );
+}
+
 function isClarifyOption(value: unknown): value is ClarifyOption {
   return (
     isRecord(value) &&
@@ -333,11 +417,80 @@ function isClarifyOption(value: unknown): value is ClarifyOption {
   );
 }
 
+function isOptionalInt(
+  value: unknown,
+  min: number,
+  max: number,
+): boolean {
+  return (
+    value === undefined ||
+    (typeof value === "number" &&
+      Number.isInteger(value) &&
+      value >= min &&
+      value <= max)
+  );
+}
+
+function isOptionalText(value: unknown, max: number): boolean {
+  return (
+    value === undefined ||
+    (typeof value === "string" && value.length <= max)
+  );
+}
+
+const QUERY_CATEGORIES = [
+  "nature",
+  "food",
+  "culture",
+  "sport",
+  "cinema",
+  "date",
+  "free",
+] as const;
+
+function isQueryCategory(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (typeof value === "string" &&
+      (QUERY_CATEGORIES as readonly string[]).includes(value))
+  );
+}
+
 /** Deep validation for plans from any NLU source (parser or model). */
 export function isAssistantPlan(value: unknown): value is AssistantPlan {
   if (!isRecord(value) || typeof value.type !== "string") return false;
 
   switch (value.type) {
+    case "briefing.today":
+    case "calendar.today":
+    case "tasks.open":
+    case "study.deadlines":
+    case "study.progress":
+    case "lifestyle.preferences":
+    case "lifestyle.saved":
+    case "lifestyle.upcomingPlans":
+    case "memory.approved":
+    case "study.documents":
+    case "lecture.overview":
+      return true;
+    case "calendar.upcoming":
+      return isOptionalInt(value.days, 0, 60);
+    case "study.attention":
+      return isOptionalInt(value.withinDays, 0, 90);
+    case "lifestyle.placesSearch":
+      return (
+        isOptionalText(value.query, 200) &&
+        isOptionalText(value.near, 200) &&
+        isQueryCategory(value.category) &&
+        isOptionalInt(value.limit, 1, 10)
+      );
+    case "study.retrieve":
+      return (
+        isShortText(value.query, 500) &&
+        (value.documentId === undefined ||
+          isShortText(value.documentId, 200)) &&
+        isOptionalInt(value.limit, 1, 10)
+      );
     case "calendar.create":
       return isNewEventFields(value.event);
     case "calendar.list":
@@ -371,6 +524,10 @@ export function isAssistantPlan(value: unknown): value is AssistantPlan {
         (value.category === null || isShortText(value.category, 64)) &&
         isShortText(value.label, 160)
       );
+    case "memory.create":
+      return isNewMemoryFields(value.entry);
+    case "tasks.create":
+      return isNewTaskFields(value.task);
     case "clarify":
       return (
         isShortText(value.question, 500) &&
@@ -396,6 +553,23 @@ const INTENT_LABEL: Record<AssistantLocale, Record<string, string>> = {
     "finance.create": "Buchung speichern",
     "finance.list": "Buchungen anzeigen",
     "finance.summary": "Ausgaben zusammenfassen",
+    "memory.create": "Erinnerung speichern",
+    "tasks.create": "Aufgabe erstellen",
+    "briefing.today": "Tagesbriefing",
+    "calendar.today": "Termine heute",
+    "calendar.upcoming": "Anstehende Termine",
+    "tasks.open": "Offene Aufgaben",
+    "study.deadlines": "Prüfungen und Fristen",
+    "study.progress": "Lernfortschritt",
+    "study.attention": "Prüfungen mit offenen Themen",
+    "lifestyle.preferences": "Freizeit-Vorlieben",
+    "lifestyle.saved": "Gemerkte Orte",
+    "lifestyle.upcomingPlans": "Anstehende Ausflüge",
+    "lifestyle.placesSearch": "Orte suchen",
+    "memory.approved": "Erinnerungen anzeigen",
+    "study.documents": "Dokumente auflisten",
+    "study.retrieve": "In Unterlagen suchen",
+    "lecture.overview": "Vorlesungen im Überblick",
   },
   ru: {
     "calendar.create": "Создать встречу",
@@ -405,6 +579,23 @@ const INTENT_LABEL: Record<AssistantLocale, Record<string, string>> = {
     "finance.create": "Сохранить операцию",
     "finance.list": "Показать операции",
     "finance.summary": "Подвести итоги расходов",
+    "memory.create": "Сохранить напоминание",
+    "tasks.create": "Создать задачу",
+    "briefing.today": "Дневной дайджест",
+    "calendar.today": "Встречи сегодня",
+    "calendar.upcoming": "Ближайшие встречи",
+    "tasks.open": "Открытые задачи",
+    "study.deadlines": "Экзамены и сроки",
+    "study.progress": "Прогресс учёбы",
+    "study.attention": "Экзамены с открытыми темами",
+    "lifestyle.preferences": "Предпочтения",
+    "lifestyle.saved": "Сохранённые места",
+    "lifestyle.upcomingPlans": "Ближайшие поездки",
+    "lifestyle.placesSearch": "Поиск мест",
+    "memory.approved": "Показать напоминания",
+    "study.documents": "Список документов",
+    "study.retrieve": "Поиск по материалам",
+    "lecture.overview": "Обзор лекций",
   },
 };
 
@@ -438,6 +629,33 @@ export function describePlan(
       return label;
     case "finance.summary":
       return `${label}: ${plan.label}`;
+    case "memory.create":
+      return `${label}: „${plan.entry.title}“`;
+    case "tasks.create":
+      return `${label}: „${plan.task.title}“ · ${plan.task.time} · ${plan.task.priority}`;
+    case "lifestyle.placesSearch": {
+      const bits = [plan.query, plan.near].filter(
+        (bit): bit is string => typeof bit === "string" && bit !== "",
+      );
+
+      return bits.length > 0 ? `${label}: ${bits.join(" · ")}` : label;
+    }
+    case "study.retrieve":
+      return `${label}: „${plan.query}“`;
+    case "briefing.today":
+    case "calendar.today":
+    case "calendar.upcoming":
+    case "tasks.open":
+    case "study.deadlines":
+    case "study.progress":
+    case "study.attention":
+    case "lifestyle.preferences":
+    case "lifestyle.saved":
+    case "lifestyle.upcomingPlans":
+    case "memory.approved":
+    case "study.documents":
+    case "lecture.overview":
+      return label;
   }
 }
 

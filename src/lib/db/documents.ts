@@ -1,5 +1,5 @@
 import { CLOUD_ENABLED } from "./mode";
-import { apiUnknown } from "./useRemoteResource";
+import { apiBytes, apiUnknown } from "./useRemoteResource";
 import {
   deleteDocument as localDeleteDocument,
   getDocumentBlob as localGetBlob,
@@ -162,24 +162,27 @@ export async function getDocumentBlob(id: string): Promise<Blob | null> {
     return localGetBlob(id);
   }
 
-  const result = await apiUnknown(
+  const result = await apiBytes(
     `/api/documents/${encodeURIComponent(id)}/download`,
-    "GET",
   );
 
   if (!result.ok) {
+    // 404 means genuinely missing (never uploaded / deleted); every
+    // other failure carries the server's message and must surface.
+    if (result.status === 404) return null;
+
     throw new Error(result.error);
   }
 
-  const { url } = result.data as { url?: unknown };
+  if (result.blob.size === 0) return null;
 
-  if (typeof url !== "string") return null;
+  // Re-wrap with the server's Content-Type so a mislabeled upload
+  // can never change how the bytes are interpreted downstream.
+  const type = result.contentType.split(";")[0]?.trim() ?? "";
 
-  const res = await fetch(url);
-
-  if (!res.ok) return null;
-
-  return res.blob();
+  return type === ""
+    ? result.blob
+    : new Blob([result.blob], { type });
 }
 
 export async function getDocumentText(id: string): Promise<string | null> {
@@ -187,24 +190,19 @@ export async function getDocumentText(id: string): Promise<string | null> {
     return localGetText(id);
   }
 
-  const result = await apiUnknown(
-    `/api/documents/${encodeURIComponent(id)}/download`,
-    "GET",
+  const result = await apiBytes(
+    `/api/documents/${encodeURIComponent(id)}/download?variant=text`,
   );
 
   if (!result.ok) {
+    // 404 means "no extracted text yet" (or doc gone): callers fall
+    // back to the file blob instead of failing the preview.
+    if (result.status === 404) return null;
+
     throw new Error(result.error);
   }
 
-  const { textUrl } = result.data as { textUrl?: unknown };
-
-  if (typeof textUrl !== "string") return null;
-
-  const res = await fetch(textUrl);
-
-  if (!res.ok) return null;
-
-  return res.text();
+  return result.blob.text();
 }
 
 export {

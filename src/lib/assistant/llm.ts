@@ -344,6 +344,271 @@ export async function chatWithOllama(
   }
 }
 
+// --------------------------------------------------------------- stream
+
+export type LlmStreamOptions = LlmChatOptions & {
+  /** Called for every content delta, in order. */
+  onToken: (delta: string) => void;
+};
+
+/**
+ * Streaming chat over POST /api/chat (`stream: true`): NDJSON chunks
+ * arrive as the model generates, each `message.content` forwarded to
+ * `onToken`. Same env, timeout, and error taxonomy as `chatWithOllama`
+ * (German `ProviderError`s, never URLs or keys); no transient retry
+ * mid-stream (a half-delivered answer must not restart silently) —
+ * the single retry covers connection setup only. Cancellation via
+ * `signal` aborts the read and surfaces as `cancelled`.
+ */
+export async function chatStreamWithOllama(
+  messages: LlmMessage[],
+  options: LlmStreamOptions,
+): Promise<LlmChatResult> {
+  if (messages.length === 0) {
+    throw new Error("chatStreamWithOllama: messages must not be empty.");
+  }
+
+  const env = ollamaEnv();
+  const model = (options.model ?? env?.model ?? "").trim();
+
+  if (model === "") {
+    throw new ProviderError("not-configured", LLM_NOT_CONFIGURED_MESSAGE);
+  }
+
+  const baseUrl =
+    options.baseUrl === undefined
+      ? (env?.baseUrl ?? OLLAMA_DEFAULT_BASE_URL)
+      : normalizeBaseUrl(options.baseUrl);
+  const timeoutMs =
+    options.timeoutMs ?? envInt("OLLAMA_CHAT_TIMEOUT_MS") ?? OLLAMA_DEFAULT_TIMEOUT_MS;
+  const numCtx = options.numCtx ?? envInt("OLLAMA_NUM_CTX");
+  const body = JSON.stringify({
+    model,
+    stream: true,
+    ...(options.format === undefined ? {} : { format: options.format }),
+    think: options.think ?? false,
+    options: {
+      temperature: options.temperature ?? 0,
+      num_predict:
+        options.numPredict ??
+        envInt("OLLAMA_NUM_PREDICT") ??
+        OLLAMA_DEFAULT_NUM_PREDICT,
+      ...(numCtx === null ? {} : { num_ctx: numCtx }),
+    },
+    messages: messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+  });
+
+  const retries = options.retries ?? 1;
+
+  for (let attempt = 0; ; attempt += 1) {
+    const lastAttempt = attempt >= retries;
+
+    throwIfAborted(options.signal);
+
+    let res: Response;
+
+    try {
+      res = await fetch(`${baseUrl}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        signal: combinedSignal(timeoutMs, options.signal),
+      });
+    } catch (error: unknown) {
+      if (abortName(error) === "AbortError") {
+        throw new ProviderError("cancelled", "Abgebrochen.");
+      }
+
+      if (!lastAttempt) {
+        await sleep(RETRY_DELAY_MS);
+        continue;
+      }
+
+      if (abortName(error) === "TimeoutError") {
+        throw timeoutError(model, timeoutMs);
+      }
+
+      throw unreachableError(model);
+    }
+
+    if (res.status === 404) {
+      throw new ProviderError(
+        "model-not-found",
+        `Das KI-Modell „${model}“ wurde auf dem Ollama-Server nicht gefunden (404). Prüfe OLLAMA_MODEL auf dem Server oder lade es mit: ollama pull ${model}`,
+      );
+    }
+
+    if (!res.ok || res.body === null) {
+      const retryable = res.status >= 500 && res.status <= 599;
+
+      if (retryable && !lastAttempt) {
+        await sleep(RETRY_DELAY_MS);
+        continue;
+      }
+
+      throw new ProviderError(
+        "upstream",
+        `Das KI-Modell „${model}“ meldet einen Fehler (${res.status}). Prüfe den Ollama-Server und OLLAMA_MODEL.`,
+      );
+    }
+
+    return readOllamaStream(res.body, model, options);
+  }
+}
+
+function abortName(error: unknown): string {
+  return error instanceof DOMException || error instanceof Error
+    ? error.name
+    : "";
+}
+
+async function readOllamaStream(
+  body: ReadableStream<Uint8Array>,
+  model: string,
+  options: LlmStreamOptions,
+): Promise<LlmChatResult> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  let thinkingChars = 0;
+  let doneReason: string | null = null;
+  let evalCount: number | null = null;
+  let reportedModel: string | null = null;
+  let sawChunk = false;
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        const chunk = parseStreamLine(line);
+
+        if (chunk === null) continue;
+
+        sawChunk = true;
+
+        if (chunk.content !== "") {
+          content += chunk.content;
+          options.onToken(chunk.content);
+        }
+
+        thinkingChars += chunk.thinkingChars;
+
+        if (chunk.done) {
+          doneReason = chunk.doneReason;
+          evalCount = chunk.evalCount;
+          reportedModel = chunk.model;
+        }
+      }
+
+      throwIfAborted(options.signal);
+    }
+  } catch (error: unknown) {
+    try {
+      await reader.cancel();
+    } catch {
+      // Teardown only; the original error below is what matters.
+    }
+
+    if (isProviderError(error)) throw error;
+    if (abortName(error) === "AbortError") {
+      throw new ProviderError("cancelled", "Abgebrochen.");
+    }
+
+    throw new ProviderError(
+      "upstream",
+      `Das KI-Modell „${model}“ hat den Stream abgebrochen. Versuche es erneut.`,
+    );
+  }
+
+  if (!sawChunk) {
+    throw new ProviderError(
+      "malformed",
+      "Das KI-Modell hat eine ungültige Antwort geliefert. Versuche es erneut oder formuliere kürzer.",
+    );
+  }
+
+  return {
+    content,
+    model: reportedModel ?? model,
+    doneReason,
+    evalCount,
+    thinkingChars,
+  };
+}
+
+type StreamChunk = {
+  content: string;
+  thinkingChars: number;
+  done: boolean;
+  doneReason: string | null;
+  evalCount: number | null;
+  model: string | null;
+};
+
+/** Parse one NDJSON line; null for blanks/heartbeats/malformed lines. */
+export function parseOllamaStreamLine(line: string): StreamChunk | null {
+  const trimmed = line.trim();
+
+  if (trimmed === "") return null;
+
+  let payload: {
+    message?: { content?: unknown; thinking?: unknown };
+    done?: unknown;
+    done_reason?: unknown;
+    eval_count?: unknown;
+    model?: unknown;
+  };
+
+  try {
+    payload = JSON.parse(trimmed) as typeof payload;
+  } catch {
+    return null;
+  }
+
+  if (typeof payload !== "object" || payload === null) return null;
+  if (Array.isArray(payload)) return null;
+
+  const message = payload.message ?? {};
+  const done = payload.done === true;
+
+  return {
+    content:
+      typeof message.content === "string" ? message.content : "",
+    thinkingChars:
+      typeof message.thinking === "string" ? message.thinking.length : 0,
+    done,
+    doneReason:
+      done && typeof payload.done_reason === "string"
+        ? payload.done_reason
+        : null,
+    evalCount:
+      done &&
+      typeof payload.eval_count === "number" &&
+      Number.isInteger(payload.eval_count)
+        ? payload.eval_count
+        : null,
+    model:
+      done && typeof payload.model === "string" && payload.model !== ""
+        ? payload.model
+        : null,
+  };
+}
+
+function parseStreamLine(line: string): StreamChunk | null {
+  return parseOllamaStreamLine(line);
+}
+
 // ---------------------------------------------------------- availability
 
 export type OllamaModelStatus = {

@@ -229,3 +229,76 @@ export function layoutDayEvents(dayEvents: CalendarEvent[]): PositionedEvent[] {
 
   return positioned;
 }
+
+const MONTH_GRID_LABEL = new Intl.DateTimeFormat("de-DE", {
+  month: "long",
+  year: "numeric",
+});
+
+const DAY_VIEW_LABEL = new Intl.DateTimeFormat("de-DE", {
+  weekday: "long",
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+});
+
+export function monthGridLabel(year: number, month: number): string {
+  return MONTH_GRID_LABEL.format(new Date(year, month, 1));
+}
+
+export function dayViewLabel(date: Date): string {
+  return DAY_VIEW_LABEL.format(date);
+}
+
+/**
+ * Monday-first month grid: always full weeks (leading/trailing days
+ * from adjacent months included), each cell flagged as in-month or not.
+ * Pure date math — no events involved.
+ */
+export function monthCells(
+  year: number,
+  month: number,
+): { date: Date; iso: string; inMonth: boolean }[] {
+  const first = new Date(year, month, 1);
+  const leading = (first.getDay() + 6) % 7;
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const total = Math.ceil((leading + daysInMonth) / 7) * 7;
+  const cells: { date: Date; iso: string; inMonth: boolean }[] = [];
+
+  for (let offset = 0; offset < total; offset += 1) {
+    const date = new Date(year, month, 1 - leading + offset);
+
+    cells.push({
+      date,
+      iso: toISODateLocal(date),
+      inMonth: date.getMonth() === month,
+    });
+  }
+
+  return cells;
+}
+
+/** Shift a year/month pair by `delta` months (pure). */
+export function shiftYearMonth(
+  year: number,
+  month: number,
+  delta: number,
+): { year: number; month: number } {
+  const date = new Date(year, month + delta, 1);
+
+  return { year: date.getFullYear(), month: date.getMonth() };
+}
+
+/** Events of one day, sorted by start time (then title). */
+export function eventsOnDay(
+  events: CalendarEvent[],
+  iso: string,
+): CalendarEvent[] {
+  return events
+    .filter((event) => event.date === iso)
+    .sort(
+      (a, b) =>
+        (timeToMinutes(a.start) ?? 0) - (timeToMinutes(b.start) ?? 0) ||
+        a.title.localeCompare(b.title, "de"),
+    );
+}

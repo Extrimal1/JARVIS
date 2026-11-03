@@ -20,6 +20,18 @@ export type Transaction = {
   importStatus?: "manual" | "imported";
   /** Original parsed description when the user edited the title. */
   originalDescription?: string;
+  /** Absent/"none" means one-off. Recurring entries are informative
+   *  markers; no automatic future bookings are generated. */
+  recurring?: RecurringCadence;
+};
+
+export type RecurringCadence = "none" | "monthly" | "quarterly" | "yearly";
+
+export const RECURRING_LABELS: Record<RecurringCadence, string> = {
+  none: "Einmalig",
+  monthly: "Monatlich",
+  quarterly: "Quartalsweise",
+  yearly: "Jährlich",
 };
 
 export type SavingsGoal = {
@@ -197,7 +209,12 @@ export function isTransaction(value: unknown): value is Transaction {
       value.importStatus === "manual" ||
       value.importStatus === "imported") &&
     (value.originalDescription === undefined ||
-      typeof value.originalDescription === "string")
+      typeof value.originalDescription === "string") &&
+    (value.recurring === undefined ||
+      value.recurring === "none" ||
+      value.recurring === "monthly" ||
+      value.recurring === "quarterly" ||
+      value.recurring === "yearly")
   );
 }
 

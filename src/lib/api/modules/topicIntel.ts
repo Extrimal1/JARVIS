@@ -38,6 +38,7 @@ import {
   loadOrderedChunks,
   toGroundedSources,
 } from "@/src/lib/api/modules/studyIntel";
+import { hasMeaningfulText } from "@/src/lib/study/autoTopics";
 
 export type TopicExtractInput = {
   documentId: string;
@@ -106,6 +107,24 @@ export async function extractTopics(
   }
 
   if (row.extraction_status !== "completed") {
+    if (row.extraction_status === "unsupported") {
+      return {
+        ok: false,
+        http: 409,
+        message:
+          "Dieses Dokument enthält keinen extrahierbaren Text (z. B. eingescanntes PDF — dafür wäre OCR nötig, das es in dieser Version noch nicht gibt).",
+      };
+    }
+
+    if (row.extraction_status === "failed") {
+      return {
+        ok: false,
+        http: 409,
+        message:
+          "Die Texterkennung dieses Dokuments ist fehlgeschlagen. Verarbeite es erneut, bevor du Themen extrahierst.",
+      };
+    }
+
     return {
       ok: false,
       http: 409,
@@ -116,6 +135,25 @@ export async function extractTopics(
   const documentName =
     typeof row.name === "string" && row.name !== "" ? row.name : "Dokument";
   const chunks = await loadOrderedChunks(db, input.documentId);
+
+  if (!hasMeaningfulText(chunks)) {
+    return {
+      ok: true,
+      response: {
+        documentId: input.documentId,
+        documentName,
+        spansDone: [],
+        skippedSpans: [],
+        topics: [],
+        droppedInvalid: 0,
+        droppedUngrounded: 0,
+        repaired: false,
+        insufficient: true,
+        done: true,
+      },
+    };
+  }
+
   const plan = planSummarySweep(chunks, SUMMARY_SPAN_BUDGET_CHARS, {});
 
   if (plan.length === 0) {

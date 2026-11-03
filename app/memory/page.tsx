@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -24,11 +24,13 @@ import { useMemory } from "@/src/lib/db/useModules";
 import {
   MEMORY_CATEGORY_LABELS,
   MEMORY_CATEGORIES,
+  MEMORY_ENABLED_KEY,
   activeMemory,
   createMemoryEntry,
   detectSensitiveHint,
   isExpired,
   needsReview,
+  parseMemoryEnabled,
   usageOf,
   type MemoryCategory,
   type MemoryEntry,
@@ -223,6 +225,29 @@ export default function MemoryPage() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
+  const [enabled, setEnabled] = useState(true);
+
+  useEffect(() => {
+    // Mount-gated: prerendered HTML must not depend on localStorage.
+    try {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setEnabled(
+        parseMemoryEnabled(window.localStorage.getItem(MEMORY_ENABLED_KEY)),
+      );
+    } catch {
+      // Private mode: memory stays enabled for this session.
+    }
+  }, []);
+
+  function setMemoryEnabled(next: boolean) {
+    setEnabled(next);
+
+    try {
+      window.localStorage.setItem(MEMORY_ENABLED_KEY, next ? "1" : "0");
+    } catch {
+      // Private mode: applies to this session only.
+    }
+  }
 
   const visible = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -383,7 +408,27 @@ export default function MemoryPage() {
             </button>
           </header>
 
-          <div className="mt-6 flex flex-wrap gap-2 text-xs" aria-live="polite">
+          <div
+            className="mt-6 flex flex-wrap items-center gap-3 rounded-2xl border border-white/[0.08] bg-[#0d111b] px-4 py-3"
+            aria-live="polite"
+          >
+            <label className="flex cursor-pointer items-center gap-2.5 text-sm text-slate-200">
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(event) => setMemoryEnabled(event.target.checked)}
+                className="h-4 w-4 accent-cyan-300"
+              />
+              Gedächtnis für Assistent & Übersicht verwenden
+            </label>
+            <p className="w-full text-xs leading-5 text-slate-500 sm:w-auto sm:flex-1">
+              {enabled
+                ? "Dauerhaftes Wissen (diese Seite) fließt in Antworten ein. Der Chat-Verlauf bleibt temporär und wird nie automatisch gespeichert."
+                : "Pausiert: Einträge bleiben gespeichert, werden aber weder vom Assistenten noch in der Übersicht verwendet."}
+            </p>
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-2 text-xs" aria-live="polite">
             <span className="rounded-full border border-white/10 px-2.5 py-1 text-slate-300">
               {stats.active} aktiv
             </span>

@@ -20,6 +20,7 @@ export type ApiErrorCode =
   | "conflict"
   | "payload-too-large"
   | "cloud-not-configured"
+  | "migration-pending"
   | "worker-unavailable"
   | "upstream-error";
 
@@ -40,16 +41,55 @@ export function fail(
   return NextResponse.json({ ok: false, error: { code, message } }, { status });
 }
 
+/**
+ * PostgREST/PG codes that mean the cloud schema is behind the code:
+ * PGRST205 table missing from schema cache, PGRST204 column missing,
+ * 42P01 undefined table. Local mode never reaches this path (it makes
+ * no cloud calls), so a pending migration only affects cloud mode.
+ */
+const MIGRATION_CODES = new Set(["PGRST204", "PGRST205", "42P01"]);
+
+export function isMigrationPending(error: SupabaseHttpError): boolean {
+  if (error.code !== undefined && MIGRATION_CODES.has(error.code)) {
+    return true;
+  }
+
+  return /schema cache|could not find the (table|.* column)|relation .* does not exist/i.test(
+    error.message,
+  );
+}
+
 /** Map unknown failures to safe client responses (details stay server-side). */
 export function failFromUnknown(route: string, error: unknown): NextResponse<ApiFail> {
   console.error(`[api:${route}]`, error);
 
   if (error instanceof SupabaseHttpError) {
+    if (isMigrationPending(error)) {
+      return fail(
+        "migration-pending",
+        "Cloud-Tabelle fehlt (Supabase-Migration ausstehend). Bitte wende die Migrationen in supabase/migrations an.",
+        503,
+      );
+    }
+
+    if (error.status === 0) {
+      return fail(
+        "upstream-error",
+        "Cloud-Backend nicht erreichbar. Bitte Verbindung prüfen und erneut versuchen.",
+        502,
+      );
+    }
+
     if (error.status === 401 || error.status === 403) {
       return fail("unauthorized", "Sitzung abgelaufen. Bitte melde dich erneut an.", 401);
     }
 
     if (error.status === 400) {
+      // 22P02: a non-UUID id reached a uuid column (legacy client id).
+      if (error.code === "22P02") {
+        return fail("bad-request", "Ungültige ID (UUID erwartet).", 400);
+      }
+
       return fail("bad-request", "Ungültige Anfrage.", 400);
     }
 

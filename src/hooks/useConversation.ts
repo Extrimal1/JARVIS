@@ -21,7 +21,8 @@ import { EMPTY_STUDY, type StudyData } from "@/src/lib/study";
 import { createId } from "@/src/lib/ids";
 import type { AssistantLocale } from "@/src/lib/assistant/actions";
 import {
-  createApiChat,
+  createApiChatStream,
+  type AgentErrorCause,
   type AgentOutcome,
   type AgentWriteUndo,
 } from "@/src/lib/assistant/agent";
@@ -51,7 +52,14 @@ import {
   listStudyDocuments,
   retrieveStudy,
 } from "@/src/lib/db/studyRetrieval";
+import { useRecordings } from "@/src/lib/lecture/useRecordings";
+import { isMemoryEnabledClient } from "@/src/lib/memory";
 import type { ProviderId } from "@/src/lib/assistant/providers";
+import {
+  PLACE_CATEGORIES,
+  type PlaceCategory,
+} from "@/src/lib/lifestyle/types";
+import { searchLivePlaces } from "@/src/lib/lifestyle/searchClient";
 
 /**
  * Shared conversation hook: the ONLY UI entry point to the
@@ -120,6 +128,12 @@ export type UndoEntry = {
   undo: AgentWriteUndo["undo"];
 };
 
+/** Classified failure: what kind of component failed + can retry help? */
+export type ErrorDetail = {
+  code: AgentErrorCause;
+  retryable: boolean;
+};
+
 export type UseConversationOptions = {
   module: ConversationModule;
   locale: AssistantLocale;
@@ -145,6 +159,7 @@ export function useConversation(options: UseConversationOptions) {
   const memory = useMemory();
   const threads = useConversationThreads();
   const messages = useConversationMessages();
+  const recordings = useRecordings();
   const today = useToday();
 
   const [engine, setEngine] = useState<EngineStatus | null>(null);
@@ -156,7 +171,9 @@ export function useConversation(options: UseConversationOptions) {
   );
   const [draftNew, setDraftNew] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorDetail, setErrorDetail] = useState<ErrorDetail | null>(null);
   const [retryText, setRetryText] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [liveCard, setLiveCard] = useState<LiveCard | null>(null);
@@ -234,6 +251,7 @@ export function useConversation(options: UseConversationOptions) {
     prefs.loading ||
     savedIds.loading ||
     memory.loading ||
+    recordings.loading ||
     threads.loading ||
     messages.loading;
 
@@ -247,6 +265,7 @@ export function useConversation(options: UseConversationOptions) {
     prefs.error ??
     savedIds.error ??
     memory.error ??
+    recordings.error ??
     threads.error ??
     messages.error ??
     null;
@@ -267,9 +286,17 @@ export function useConversation(options: UseConversationOptions) {
         saveTransaction: finance.saveTransaction,
         deleteTransaction: finance.deleteTransaction,
       },
+      memories: {
+        saveMemory: memory.create,
+        deleteMemory: memory.remove,
+      },
+      tasks: {
+        saveTask: tasks.create,
+        deleteTask: tasks.remove,
+      },
       locale,
     }),
-    [calendar, finance, locale],
+    [calendar, finance, memory, tasks, locale],
   );
 
   const selectThread = useCallback(
@@ -279,6 +306,7 @@ export function useConversation(options: UseConversationOptions) {
       setLiveCard(null);
       setUndos([]);
       setError(null);
+      setErrorDetail(null);
       setRetryText(null);
       setNotice(null);
     },
@@ -291,6 +319,7 @@ export function useConversation(options: UseConversationOptions) {
     setLiveCard(null);
     setUndos([]);
     setError(null);
+    setErrorDetail(null);
     setRetryText(null);
     setNotice(null);
   }, [setSelectedId]);
@@ -332,6 +361,10 @@ export function useConversation(options: UseConversationOptions) {
       }
 
       setError(outcome.message);
+      setErrorDetail({
+        code: outcome.code ?? "unknown",
+        retryable: outcome.retryable ?? true,
+      });
       setRetryText(text);
     },
     [],
@@ -352,6 +385,7 @@ export function useConversation(options: UseConversationOptions) {
             ? "Данные ещё загружаются. Подожди немного."
             : "Daten werden noch geladen. Bitte warte kurz.",
         );
+        setErrorDetail({ code: "unknown", retryable: true });
 
         return;
       }
@@ -363,13 +397,16 @@ export function useConversation(options: UseConversationOptions) {
         setError(
           "Kein KI-Modell konfiguriert. Setze OLLAMA_MODEL auf dem Server oder nutze das lokale Regelwerk (ASSISTANT_PROVIDER=heuristic).",
         );
+        setErrorDetail({ code: "provider", retryable: false });
 
         return;
       }
 
       busyRef.current = true;
       setBusy(true);
+      setStreaming(false);
       setError(null);
+      setErrorDetail(null);
       setRetryText(null);
       setNotice(null);
       setLiveCard(null);
@@ -390,7 +427,11 @@ export function useConversation(options: UseConversationOptions) {
                 "Europe/Berlin",
               locale,
             })
-          : createApiChat(fetch, controller.signal);
+          : createApiChatStream(fetch, controller.signal, () => {
+              // First token flips the busy hint from "thinking" to
+              // "writing" (one state change, not per-token renders).
+              setStreaming(true);
+            });
 
       try {
         const result = await sendConversationTurn({
@@ -408,7 +449,11 @@ export function useConversation(options: UseConversationOptions) {
             savedIds: savedIds.ids,
             plans: plans.items,
             prefs: prefs.data,
-            memory: memory.items,
+            // Kill-switch (Memory page): disabled = the agent sees no
+            // entries. Saving stays possible; nothing is deleted.
+            memory: isMemoryEnabledClient() ? memory.items : [],
+            sessions: recordings.sessions,
+            recordings: recordings.recordings,
             todayISO: currentToday,
             nowTime,
           },
@@ -421,6 +466,14 @@ export function useConversation(options: UseConversationOptions) {
             transactions: {
               saveTransaction: finance.saveTransaction,
               deleteTransaction: finance.deleteTransaction,
+            },
+            memories: {
+              saveMemory: memory.create,
+              deleteMemory: memory.remove,
+            },
+            tasks: {
+              saveTask: tasks.create,
+              deleteTask: tasks.remove,
             },
           },
           threads,
@@ -442,6 +495,69 @@ export function useConversation(options: UseConversationOptions) {
                   limit:
                     typeof args.limit === "number" ? args.limit : undefined,
                 }),
+              // Live OSM search. Model args win; stored preferences
+              // (city, opt-in coordinates, radius) are the defaults.
+              // Domain failures return ok:false — never throw.
+              "lifestyle.placesSearch": async (args, signal) => {
+                const stored = prefs.data;
+                const useCoords =
+                  stored.useGeolocation &&
+                  stored.latitude !== null &&
+                  stored.longitude !== null;
+                const rawCategory = args.category;
+                const rawLimit = args.limit;
+                const result = await searchLivePlaces(
+                  {
+                    query:
+                      typeof args.query === "string" ? args.query : "",
+                    near:
+                      typeof args.near === "string"
+                        ? args.near
+                        : useCoords
+                          ? ""
+                          : stored.city,
+                    latitude: useCoords ? stored.latitude : null,
+                    longitude: useCoords ? stored.longitude : null,
+                    radiusKm: stored.radiusKm,
+                    category:
+                      typeof rawCategory === "string" &&
+                      (
+                        PLACE_CATEGORIES as readonly string[]
+                      ).includes(rawCategory)
+                        ? (rawCategory as PlaceCategory)
+                        : "all",
+                    limit:
+                      typeof rawLimit === "number" &&
+                      Number.isInteger(rawLimit) &&
+                      rawLimit >= 1 &&
+                      rawLimit <= 10
+                        ? rawLimit
+                        : 5,
+                  },
+                  fetch,
+                  signal,
+                );
+
+                if (!result.ok) {
+                  return {
+                    ok: false as const,
+                    error: {
+                      code: "unavailable" as const,
+                      message: result.error,
+                    },
+                  };
+                }
+
+                return {
+                  ok: true as const,
+                  data: {
+                    places: result.places,
+                    resolvedLocation: result.resolvedLocation,
+                    notice: result.notice,
+                    diagnostics: result.diagnostics,
+                  },
+                };
+              },
             },
           },
         });
@@ -462,11 +578,13 @@ export function useConversation(options: UseConversationOptions) {
             ? error.message
             : "Unbekannter Fehler.",
         );
+        setErrorDetail({ code: "unknown", retryable: true });
         setRetryText(text);
       } finally {
         if (sendToken.current === token) {
           busyRef.current = false;
           setBusy(false);
+          setStreaming(false);
           abortRef.current = null;
         }
       }
@@ -484,6 +602,7 @@ export function useConversation(options: UseConversationOptions) {
       places,
       plans,
       prefs,
+      recordings,
       savedIds,
       setSelectedId,
       storesLoading,
@@ -502,6 +621,7 @@ export function useConversation(options: UseConversationOptions) {
     abortRef.current = null;
     busyRef.current = false;
     setBusy(false);
+    setStreaming(false);
   }, []);
 
   const retry = useCallback(() => {
@@ -654,11 +774,14 @@ export function useConversation(options: UseConversationOptions) {
     effectiveId,
     turns,
     busy,
+    streaming,
     error,
+    errorDetail,
     notice,
     liveCard,
     undos,
-    canRetry: retryText !== null && !busy,
+    canRetry:
+      retryText !== null && !busy && (errorDetail?.retryable ?? true),
     send,
     cancel,
     retry,

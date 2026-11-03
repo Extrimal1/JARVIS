@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Plus,
+  Repeat,
   TrendingDown,
   TrendingUp,
   Wallet,
@@ -27,6 +28,7 @@ import {
   type ImportBatchInput,
 } from "@/src/lib/db/useModules";
 import {
+  RECURRING_LABELS,
   formatCents,
   formatSignedCents,
   isEuroTransaction,
@@ -564,8 +566,24 @@ export default function FinancePage() {
                           />
 
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm text-slate-200">
-                              {transaction.title}
+                            <span className="flex items-center gap-2 text-sm text-slate-200">
+                              <span className="min-w-0 truncate">
+                                {transaction.title}
+                              </span>
+                              {transaction.recurring !== undefined &&
+                                transaction.recurring !== "none" && (
+                                  <span
+                                    title={`Wiederkehrend: ${RECURRING_LABELS[transaction.recurring]} (nur Kennzeichnung)`}
+                                    className="flex shrink-0 items-center gap-1 rounded-full bg-cyan-300/10 px-2 py-0.5 text-[10px] text-cyan-200"
+                                  >
+                                    <Repeat size={10} />
+                                    {
+                                      RECURRING_LABELS[
+                                        transaction.recurring
+                                      ]
+                                    }
+                                  </span>
+                                )}
                             </span>
                             <span className="mt-1 block truncate text-xs text-slate-500">
                               {formatDay(transaction.date)} ·{" "}

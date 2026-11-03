@@ -44,6 +44,14 @@ export type LocalRecording = {
   consentAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Free-form lecture notes (user-entered, never auto-generated). */
+  notes?: string;
+  /** Linked study subject id (see StudyData.subjects), "" = none. */
+  subjectId?: string;
+  /** Worker-produced transcript full text (absent = not transcribed). */
+  transcript?: string;
+  /** ISO timestamp of the transcription, absent when none. */
+  transcribedAt?: string;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -103,7 +111,12 @@ export function isLocalRecording(value: unknown): value is LocalRecording {
     typeof value.errorCode === "string" &&
     (value.consentAt === null || isIsoString(value.consentAt)) &&
     isIsoString(value.createdAt) &&
-    isIsoString(value.updatedAt)
+    isIsoString(value.updatedAt) &&
+    (value.notes === undefined || typeof value.notes === "string") &&
+    (value.subjectId === undefined || typeof value.subjectId === "string") &&
+    (value.transcript === undefined ||
+      typeof value.transcript === "string") &&
+    (value.transcribedAt === undefined || isIsoString(value.transcribedAt))
   );
 }
 

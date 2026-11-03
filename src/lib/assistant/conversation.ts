@@ -196,6 +196,8 @@ function persistFailed(locale: AssistantLocale, reason: string): AgentOutcome {
       locale === "ru"
         ? `Ответ не сохранён в истории: ${reason}`
         : `Antwort konnte nicht im Verlauf gespeichert werden: ${reason}`,
+    code: "persist",
+    retryable: true,
   };
 }
 

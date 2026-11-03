@@ -605,7 +605,11 @@ export type TopicsExtractResponse = {
   repaired: boolean;
   /** True when no usable chunks existed (no LLM call happened). */
   insufficient: boolean;
-  /** True when every sweep span is done or skipped. */
+  /**
+   * True only when every sweep span is covered. Skipped spans
+   * stay retryable (done:false); the client bounds retries and
+   * reports exhausted spans instead of looping forever.
+   */
   done: boolean;
 };
 

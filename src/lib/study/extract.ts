@@ -513,17 +513,33 @@ function textRuns(xml: string, tag: "w:t" | "a:t"): string[] {
   return runs;
 }
 
-function docxParagraphs(documentXml: string): ExtractedBlock[] {
+/**
+ * Raw `<w:p>` paragraph chunks (without the closing tag). Exported
+ * for previews, which need the paragraph XML (styles, numbering)
+ * that plain extraction discards.
+ */
+export function splitDocxParagraphs(documentXml: string): string[] {
   const chunks = documentXml.split("</w:p>");
+
+  return chunks.slice(0, Math.max(0, chunks.length - 1));
+}
+
+/** Joined, whitespace-normalized `<w:t>` text of one paragraph chunk. */
+export function wordRunText(paragraphXml: string): string {
+  return textRuns(paragraphXml, "w:t")
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function docxParagraphs(documentXml: string): ExtractedBlock[] {
+  const chunks = splitDocxParagraphs(documentXml);
   const blocks: ExtractedBlock[] = [];
 
   // Numbering counts every paragraph (even empty ones) so "Absatz N"
   // stays stable; empty paragraphs carry no text and are skipped.
-  for (let index = 0; index < chunks.length - 1; index += 1) {
-    const text = textRuns(chunks[index] ?? "", "w:t")
-      .join("")
-      .replace(/\s+/g, " ")
-      .trim();
+  for (let index = 0; index < chunks.length; index += 1) {
+    const text = wordRunText(chunks[index] ?? "");
 
     if (text !== "") {
       blocks.push({ text, ref: { kind: "paragraph", paragraph: index + 1 } });
@@ -533,13 +549,22 @@ function docxParagraphs(documentXml: string): ExtractedBlock[] {
   return blocks;
 }
 
+/** Raw `<a:p>` line chunks of one slide (without the closing tag). */
+export function splitPptxLines(slideXml: string): string[] {
+  const chunks = slideXml.split("</a:p>");
+
+  return chunks.slice(0, Math.max(0, chunks.length - 1));
+}
+
+/** Joined, whitespace-normalized `<a:t>` text of one line chunk. */
+export function drawingRunText(lineXml: string): string {
+  return textRuns(lineXml, "a:t").join("").replace(/\s+/g, " ").trim();
+}
+
 function pptxSlideText(slideXml: string): string {
   // <a:p> groups runs into visual lines; keep the line breaks.
-  return slideXml
-    .split("</a:p>")
-    .map((line) =>
-      textRuns(line, "a:t").join("").replace(/\s+/g, " ").trim(),
-    )
+  return splitPptxLines(slideXml)
+    .map((line) => drawingRunText(line))
     .filter((line) => line !== "")
     .join("\n");
 }
@@ -608,13 +633,25 @@ async function extractPdfBlocks(bytes: Uint8Array): Promise<{
   return { blocks, warnings, pageCount: parsed.pageCount };
 }
 
-async function extractDocxBlocks(
+export type DocxOfficeXml = {
+  documentXml: string;
+  numberingXml: string | null;
+  footnotesXml: string | null;
+  endnotesXml: string | null;
+};
+
+/**
+ * Raw DOCX part XML. Shared by extraction and previews so both read
+ * the same bytes (same zip guards, same errors).
+ */
+export async function readDocxOfficeXml(
   bytes: Uint8Array,
-): Promise<ExtractedDocument> {
+): Promise<DocxOfficeXml> {
   const files = await readWantedEntries(
     bytes,
     (name) =>
       name === "word/document.xml" ||
+      name === "word/numbering.xml" ||
       name === "word/footnotes.xml" ||
       name === "word/endnotes.xml",
   );
@@ -627,16 +664,212 @@ async function extractDocxBlocks(
     );
   }
 
+  return {
+    documentXml,
+    numberingXml: files.get("word/numbering.xml") ?? null,
+    footnotesXml: files.get("word/footnotes.xml") ?? null,
+    endnotesXml: files.get("word/endnotes.xml") ?? null,
+  };
+}
+
+export type PptxSlideXml = {
+  /**
+   * User-visible slide number: presentation position (1-based) when
+   * ppt/presentation.xml resolves an order, else the file number
+   * from ppt/slides/slideN.xml. Empty slides keep their number
+   * (skipped blocks never shift later refs).
+   */
+  slide: number;
+  xml: string;
+  /** Original archive path, e.g. "ppt/slides/slide3.xml". */
+  file: string;
+};
+
+/** Resolves a .rels Target against its base dir (handles ../). */
+function resolvePptTarget(baseDir: string, target: string): string {
+  if (target.startsWith("/")) return target.slice(1);
+
+  const base = baseDir.split("/").filter((part) => part !== "");
+
+  for (const part of target.split("/")) {
+    if (part === "" || part === ".") continue;
+
+    if (part === "..") {
+      base.pop();
+      continue;
+    }
+
+    base.push(part);
+  }
+
+  return base.join("/");
+}
+
+/**
+ * Presentation-order slide files from ppt/presentation.xml
+ * (<p:sldId r:id>) joined with ppt/_rels/presentation.xml.rels.
+ * Empty when either part is missing or unparseable (fallback
+ * to filename-numeric order).
+ */
+function presentationSlideOrder(
+  presentationXml: string,
+  relsXml: string,
+): string[] {
+  const ids: string[] = [];
+  const sldIdPattern = /sldId\b[^>]*\br:id="([^"]+)"/g;
+  let sldMatch: RegExpExecArray | null;
+
+  while ((sldMatch = sldIdPattern.exec(presentationXml)) !== null) {
+    const id = sldMatch[1] ?? "";
+
+    if (id !== "") ids.push(id);
+  }
+
+  if (ids.length === 0) return [];
+
+  const targets = new Map<string, string>();
+  const relPattern = /<Relationship\b[^>]*>/g;
+  let relMatch: RegExpExecArray | null;
+
+  while ((relMatch = relPattern.exec(relsXml)) !== null) {
+    const tag = relMatch[0] ?? "";
+    const id = /Id="([^"]+)"/.exec(tag)?.[1] ?? "";
+    const target = /Target="([^"]+)"/.exec(tag)?.[1] ?? "";
+
+    if (id !== "" && target !== "") {
+      targets.set(id, resolvePptTarget("ppt/", target));
+    }
+  }
+
+  const ordered: string[] = [];
+
+  for (const id of ids) {
+    const name = targets.get(id);
+
+    if (name !== undefined && slideNumber(name) !== null) {
+      ordered.push(name);
+    }
+  }
+
+  return ordered;
+}
+
+function orderPptxSlides(
+  slideFiles: { name: string; xml: string }[],
+  presentationXml: string | null,
+  relsXml: string | null,
+): PptxSlideXml[] {
+  if (presentationXml !== null && relsXml !== null) {
+    const orderedNames = presentationSlideOrder(presentationXml, relsXml);
+
+    if (orderedNames.length > 0) {
+      const byName = new Map(slideFiles.map((file) => [file.name, file.xml]));
+      const seen = new Set<string>();
+      const ordered: PptxSlideXml[] = [];
+
+      for (const name of orderedNames) {
+        const xml = byName.get(name);
+
+        if (xml !== undefined && !seen.has(name)) {
+          seen.add(name);
+          ordered.push({ slide: 0, xml, file: name });
+        }
+      }
+
+      // Files outside the presentation order (never for real
+      // PowerPoint output) append in filename order.
+      const rest = slideFiles
+        .filter((file) => !seen.has(file.name))
+        .sort(
+          (a, b) => (slideNumber(a.name) ?? 0) - (slideNumber(b.name) ?? 0),
+        );
+
+      for (const file of rest) {
+        ordered.push({ slide: 0, xml: file.xml, file: file.name });
+      }
+
+      // Positional user-visible numbers in presentation order.
+      ordered.forEach((entry, index) => {
+        entry.slide = index + 1;
+      });
+
+      return ordered;
+    }
+  }
+
+  return slideFiles
+    .map((file) => ({
+      slide: slideNumber(file.name) ?? 0,
+      xml: file.xml,
+      file: file.name,
+    }))
+    .sort((a, b) => a.slide - b.slide);
+}
+
+/**
+ * Raw PPTX slide XML in presentation order (positional slide
+ * numbers), falling back to filename-numeric order when the
+ * presentation parts are absent. Shared by extraction and
+ * previews so both show the same slide order and numbers.
+ */
+export async function readPptxSlideXml(
+  bytes: Uint8Array,
+): Promise<PptxSlideXml[]> {
+  const files = await readWantedEntries(
+    bytes,
+    (name) =>
+      slideNumber(name) !== null ||
+      name === "ppt/presentation.xml" ||
+      name === "ppt/_rels/presentation.xml.rels",
+  );
+  const slideFiles = [...files.entries()]
+    .filter(([name]) => slideNumber(name) !== null)
+    .map(([name, xml]) => ({ name, xml }));
+
+  if (slideFiles.length === 0) {
+    throw new ExtractError(
+      "corrupt",
+      "Das PPTX-Archiv enthält keine Folien (ppt/slides/ fehlt).",
+    );
+  }
+
+  return orderPptxSlides(
+    slideFiles,
+    files.get("ppt/presentation.xml") ?? null,
+    files.get("ppt/_rels/presentation.xml.rels") ?? null,
+  );
+}
+
+/** Notes target of one slide rels file, or null when absent. */
+function notesTargetFromSlideRels(relsXml: string): string | null {
+  const relPattern = /<Relationship\b[^>]*>/g;
+  let relMatch: RegExpExecArray | null;
+
+  while ((relMatch = relPattern.exec(relsXml)) !== null) {
+    const target = /Target="([^"]+)"/.exec(relMatch[0] ?? "")?.[1] ?? "";
+
+    if (target !== "" && target.includes("notesSlide")) {
+      return resolvePptTarget("ppt/slides/", target);
+    }
+  }
+
+  return null;
+}
+
+async function extractDocxBlocks(
+  bytes: Uint8Array,
+): Promise<ExtractedDocument> {
+  const { documentXml, footnotesXml, endnotesXml } =
+    await readDocxOfficeXml(bytes);
+
   const blocks = docxParagraphs(documentXml);
   const warnings: string[] = [];
 
-  for (const [name, label] of [
-    ["word/footnotes.xml", "Fußnoten"],
-    ["word/endnotes.xml", "Endnoten"],
+  for (const [xml, label] of [
+    [footnotesXml, "Fußnoten"],
+    [endnotesXml, "Endnoten"],
   ] as const) {
-    const xml = files.get(name);
-
-    if (xml === undefined) continue;
+    if (xml === null) continue;
 
     const notes = textRuns(xml, "w:t")
       .join(" ")
@@ -658,44 +891,67 @@ async function extractDocxBlocks(
 async function extractPptxBlocks(
   bytes: Uint8Array,
 ): Promise<ExtractedDocument> {
-  const files = await readWantedEntries(
+  const slides = await readPptxSlideXml(bytes);
+  // Speaker notes (best effort): slide rels map each slide to its
+  // notes slide; same-number notesSlideN.xml is the fallback for
+  // producers without rels. Absent parts mean no notes, never an
+  // error — notes only ever extend their own slide's text.
+  const relsAndNotes = await readWantedEntries(
     bytes,
-    (name) => slideNumber(name) !== null,
-  );
-
-  if (files.size === 0) {
-    throw new ExtractError(
-      "corrupt",
-      "Das PPTX-Archiv enthält keine Folien (ppt/slides/ fehlt).",
-    );
-  }
-
-  const names = [...files.keys()].sort(
-    (a, b) => (slideNumber(a) ?? 0) - (slideNumber(b) ?? 0),
+    (name) =>
+      (name.startsWith("ppt/slides/_rels/") && name.endsWith(".rels")) ||
+      (name.startsWith("ppt/notesSlides/") && name.endsWith(".xml")),
   );
   const blocks: ExtractedBlock[] = [];
 
-  for (const name of names) {
-    const text = pptxSlideText(files.get(name) ?? "");
+  for (const { slide, xml, file } of slides) {
+    const body = pptxSlideText(xml);
+    let notes = "";
+    const base = file.split("/").pop() ?? "";
+    const relsXml = relsAndNotes.get(`ppt/slides/_rels/${base}.rels`);
+
+    if (relsXml !== undefined) {
+      const target = notesTargetFromSlideRels(relsXml);
+      const notesXml =
+        target === null ? undefined : relsAndNotes.get(target);
+
+      if (notesXml !== undefined) notes = pptxSlideText(notesXml);
+    }
+
+    if (notes === "") {
+      const fileNumber = slideNumber(file);
+
+      if (fileNumber !== null) {
+        const fallback = relsAndNotes.get(
+          `ppt/notesSlides/notesSlide${fileNumber}.xml`,
+        );
+
+        if (fallback !== undefined) notes = pptxSlideText(fallback);
+      }
+    }
+
+    const text =
+      body !== "" && notes !== ""
+        ? `${body}\n${notes}`
+        : body !== ""
+          ? body
+          : notes;
 
     if (text !== "") {
-      blocks.push({
-        text,
-        ref: { kind: "slide", slide: slideNumber(name) ?? 0 },
-      });
+      blocks.push({ text, ref: { kind: "slide", slide } });
     }
   }
 
   const warnings: string[] = [];
-  const empty = names.length - blocks.length;
+  const empty = slides.length - blocks.length;
 
   if (empty > 0) {
     warnings.push(
-      `${empty} von ${names.length} Folien enthalten keinen lesbaren Text.`,
+      `${empty} von ${slides.length} Folien enthalten keinen lesbaren Text.`,
     );
   }
 
-  return { blocks, warnings, pageCount: names.length };
+  return { blocks, warnings, pageCount: slides.length };
 }
 
 function extractTextBlocks(bytes: Uint8Array): ExtractedDocument {

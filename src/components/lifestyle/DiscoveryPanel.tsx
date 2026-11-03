@@ -55,8 +55,8 @@ export function DiscoveryPanel({
             </p>
             <p className="mx-auto mt-1 max-w-md text-xs leading-5 text-slate-500">
               Empfehlungen entstehen erst aus deinen eigenen Einträgen –
-              es gibt hier keine erfundenen Tipps und keine externen
-              Anbieter.
+              es gibt hier keine erfundenen Tipps. Neue Orte findest du über die Live-Suche weiter unten.
+              Lege erste Orte an oder übernimm Treffer aus der Suche.
             </p>
             <Link
               href="#orte"
@@ -134,7 +134,7 @@ export function DiscoveryPanel({
       </div>
 
       <p className="mt-4 text-xs leading-5 text-slate-600">
-        Quelle: Eigene Einträge · Externe Anbieter sind nicht konfiguriert.{" "}
+        Quelle: Eigene Einträge · Live-Suche: OpenStreetMap (siehe unten).{" "}
         <Link
           href="#datenquellen"
           className="text-slate-500 underline-offset-2 transition hover:text-cyan-200 hover:underline"

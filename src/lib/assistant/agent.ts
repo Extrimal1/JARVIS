@@ -9,6 +9,10 @@ import type {
   Place,
 } from "@/src/lib/lifestyle/types";
 import type { MemoryEntry } from "@/src/lib/memory";
+import type {
+  LectureSession,
+  LocalRecording,
+} from "@/src/lib/lecture/types";
 import {
   extractJsonPayload,
   isAssistantPlan,
@@ -30,12 +34,14 @@ import {
 } from "./registry";
 import {
   getApprovedMemory,
+  getBriefingToday,
   getCalendarList,
   getExamsNeedingAttention,
   getFinanceList,
   getFinanceMonthSummary,
   getFinanceSummary,
   getLargestTransactions,
+  getLectureOverview,
   getLifestylePreferences,
   getOpenTasks,
   getSavedPlaces,
@@ -106,13 +112,16 @@ export type AgentData = {
   plans: OutingPlan[];
   prefs: LifestylePreferences;
   memory: MemoryEntry[];
+  /** Lecture library (IndexedDB); absent = tool reports invalid input. */
+  sessions?: LectureSession[];
+  recordings?: LocalRecording[];
   todayISO: string;
   nowTime: string;
 };
 
 export type AgentStores = Pick<
   ExecutorDeps,
-  "calendar" | "transactions"
+  "calendar" | "transactions" | "memories" | "tasks"
 >;
 
 export type AgentOptions = {
@@ -158,6 +167,49 @@ export type AgentWriteUndo = {
   undo: UndoAction;
 };
 
+/**
+ * Machine-readable failure cause for `AgentOutcome` errors (ISSUE 5:
+ * error visibility). The UI shows what failed (message), why (cause
+ * label), and whether retrying can help (`retryable`).
+ *
+ * - ollama: the model server failed (unreachable, 5xx, bad payload)
+ * - supabase: cloud persistence/backend failed
+ * - provider: the engine is misconfigured (model missing, bad env)
+ * - format: the request itself was rejected (validation, limits)
+ * - network: the browser never reached the server
+ * - auth: the session expired (re-login, not retry)
+ * - budget: the turn exceeded its step/time budget
+ * - model: the model broke the envelope protocol twice
+ * - persist: the turn ran but history could not be stored
+ * - aborted: the user cancelled the turn
+ * - unknown: anything else (custom transports, unexpected throws)
+ */
+export type AgentErrorCause =
+  | "ollama"
+  | "supabase"
+  | "provider"
+  | "format"
+  | "network"
+  | "auth"
+  | "budget"
+  | "model"
+  | "persist"
+  | "aborted"
+  | "unknown";
+
+/** Transport failure with a classified cause + retry hint. */
+export class AgentChatError extends Error {
+  code: AgentErrorCause;
+  retryable: boolean;
+
+  constructor(message: string, code: AgentErrorCause, retryable: boolean) {
+    super(message);
+    this.name = "AgentChatError";
+    this.code = code;
+    this.retryable = retryable;
+  }
+}
+
 export type AgentOutcome =
   | { status: "done"; answer: string; steps: AgentStep[]; undos: AgentWriteUndo[] }
   | {
@@ -173,7 +225,14 @@ export type AgentOutcome =
       plan: ActionPlan;
       note: string;
     }
-  | { status: "error"; message: string };
+  | {
+      status: "error";
+      message: string;
+      /** Machine-readable cause; absent on legacy custom outcomes. */
+      code?: AgentErrorCause;
+      /** False when re-sending cannot help (auth, format, config). */
+      retryable?: boolean;
+    };
 
 const DEFAULT_MAX_STEPS = 6;
 const MAX_HISTORY_MESSAGES = 20;
@@ -186,13 +245,34 @@ const MAX_MISTAKES = 2;
 const DEFAULT_BARE_FINAL_CHARS = 200;
 
 const BARE_FINAL_CHALLENGE_DE =
-  "Du hast kein Werkzeug aufgerufen. Falls die Frage Fakten (Termine, Aufgaben, Zahlen, Orte, Erinnerungen, Lernstand, Dokumente) betrifft, rufe JETZT das passende Werkzeug auf. Nur wenn wirklich keine Fakten nötig sind, wiederhole deine Antwort als {\"final\": \"…\"}.";
+  "Du hast kein Werkzeug aufgerufen. Falls die Frage Fakten (Termine, Aufgaben, Zahlen, Orte, Erinnerungen, Lernstand, Vorlesungen, Dokumente) betrifft, rufe JETZT das passende Werkzeug auf. Nur wenn wirklich keine Fakten nötig sind, wiederhole deine Antwort als {\"final\": \"…\"}.";
 
 const BARE_FINAL_CHALLENGE_RU =
-  "Ты не вызвал ни одного инструмента. Если вопрос касается фактов (встречи, задачи, цифры, места, воспоминания, учёба, документы), вызови СЕЙЧАС подходящий инструмент. Только если факты действительно не нужны, повтори ответ как {\"final\": \"…\"}.";
+  "Ты не вызвал ни одного инструмента. Если вопрос касается фактов (встречи, задачи, цифры, места, воспоминания, учёба, лекции, документы), вызови СЕЙЧАС подходящий инструмент. Только если факты действительно не нужны, повтори ответ как {\"final\": \"…\"}.";
 
 function bareFinalChallenge(locale: AssistantLocale): string {
   return locale === "ru" ? BARE_FINAL_CHALLENGE_RU : BARE_FINAL_CHALLENGE_DE;
+}
+
+const PLACE_CHALLENGE_DE =
+  "Diese Frage betrifft Orte, aber du hast lifestyle.placesSearch nicht aufgerufen. Rufe JETZT lifestyle.placesSearch auf (Suchtext, Umgebung, Kategorie) und nenne nur echte Treffer mit Quelle — Orte, Adressen, Öffnungszeiten oder Bewertungen zu erfinden ist VERBOTEN. Nur wenn du erst eine Rückfrage stellen musst (z. B. welche Stadt), wiederhole deine Antwort als {\"final\": \"…\"}.";
+
+const PLACE_CHALLENGE_RU =
+  "Этот вопрос касается мест, но ты не вызвал lifestyle.placesSearch. Вызови СЕЙЧАС lifestyle.placesSearch (запрос, окрестность, категория) и называй только настоящие результаты с источником — выдумывать места, адреса, часы работы или оценки ЗАПРЕЩЕНО. Только если сначала нужен уточняющий вопрос (например, какой город), повтори ответ как {\"final\": \"…\"}.";
+
+function placeChallenge(locale: AssistantLocale): string {
+  return locale === "ru" ? PLACE_CHALLENGE_RU : PLACE_CHALLENGE_DE;
+}
+
+/**
+ * True when the user's question is about places/venues. Used for the
+ * one-round "call the search tool instead of inventing" challenge —
+ * a cheap keyword gate, never a verdict about the answer itself.
+ */
+export function looksLikePlaceQuery(text: string): boolean {
+  return /ort|pl[äa]tz|restaurants?|caf[eé]s?|bars?|kneipe|kinoabend|kino|film|museum|theater|konzert|park|hotel|pension|sehensw[üu]rdig|ausflug|spazier|wander|fitness|gym|veranstaltung|einkauf|shopping|wochenende|weekend|strand|essen\s+gehen|wo\s+kann|in\s+der\s+n[äa]he|umgebung|freizeit|мест|ресторан|кафе|бар|кино|музей|театр|парк|отел|достопримечател|куда\s+сходить|погулять|поесть|выходн|фитнес/i.test(
+    text,
+  );
 }
 
 /**
@@ -204,7 +284,9 @@ export function isAgentLoopPrompt(text: string): boolean {
   return (
     text === AGENT_CORRECTION ||
     text === BARE_FINAL_CHALLENGE_DE ||
-    text === BARE_FINAL_CHALLENGE_RU
+    text === BARE_FINAL_CHALLENGE_RU ||
+    text === PLACE_CHALLENGE_DE ||
+    text === PLACE_CHALLENGE_RU
   );
 }
 
@@ -229,9 +311,15 @@ export const MODEL_PARAMS: Record<string, string> = {
   "lifestyle.preferences": "keine",
   "lifestyle.saved": "keine",
   "lifestyle.upcomingPlans": "keine",
+  "lifestyle.placesSearch":
+    '{"query"?, "near"?, "category"? (nature|food|culture|sport|cinema|date|free), "limit"?: 1–10}',
   "memory.approved": "keine",
+  "memory.create":
+    '{"entry": {category preferences|goals|study|finance|lifestyle|assistant, title, content}}',
+  "lecture.overview": "keine",
   "study.documents": "keine",
   "study.retrieve": '{"query" (erforderlich), "documentId"?, "limit"?: 1–10}',
+  "briefing.today": "keine",
   "calendar.create":
     '{"event": {title, date YYYY-MM-DD, start/end HH:MM, type personal|lecture|exam, description, location}}',
   "calendar.update":
@@ -239,6 +327,8 @@ export const MODEL_PARAMS: Record<string, string> = {
   "calendar.delete": '{"ref": {titleQuery, date?}}',
   "finance.create":
     '{"transaction": {title, amountCents (ganzzahlig > 0), type income|expense, category, date YYYY-MM-DD, currency EUR, note}}',
+  "tasks.create":
+    '{"task": {title, time ("HH:MM" oder "Keine Frist"), priority Niedrig|Mittel|Hoch}}',
 };
 
 function toolCatalog(granted: ToolPermission[]): string {
@@ -260,7 +350,7 @@ export function buildAgentSystemPrompt(input: {
 
   return `Du bist J.A.R.V.I.S., ein persönlicher Assistent. Heute ist ${input.todayISO}, lokale Uhrzeit ${input.nowTime}. Antwortsprache: ${lang}.
 
-Du hast ausschließlich diese Werkzeuge (kein SQL, keine Shell, kein Code, kein Internet):
+Du hast ausschließlich diese Werkzeuge (kein SQL, keine Shell, kein Code, kein direkter Internetzugriff — Live-Daten nur über Werkzeuge wie lifestyle.placesSearch und study.retrieve):
 
 ${toolCatalog(input.granted)}
 
@@ -268,7 +358,7 @@ Antworte IMMER mit genau einem JSON-Objekt, ohne Markdown und ohne Fließtext:
 - finales Ergebnis: {"final": "<Antwort an den Nutzer>"}
 - Werkzeug aufrufen: {"tool": "<id>", "args": {…}}
 
-Regeln: Bei JEDER Frage zu Terminen, Aufgaben, Finanzen, Orten, Erinnerungen, Lernstand oder Dokumenteninhalten MUSST du zuerst das passende Werkzeug aufrufen — eine finale Antwort ohne vorherigen Werkzeugaufruf ist dann VERBOTEN (erfinde NIEMALS Werte). Für Fragen zu Unterlagen nutze study.retrieve (Dokumente listet study.documents) und belege jede Aussage mit den [Qn]-Quellen aus dem Werkzeugergebnis — Quellen zu erfinden ist VERBOTEN. Findet das Werkzeug nichts, sage ehrlich, dass die Unterlagen nichts enthalten. Nur bei Begrüßung, Smalltalk oder Rückfragen darfst du direkt per "final" antworten. Schreib-Werkzeuge nur bei vollständigen Angaben, sonst frage per "final" nach. Deutsche Beträge ("24,50") werden zu Cent. Relative Daten löst du gegen Heute auf. Fasse Tool-Ergebnisse in der finalen Antwort zusammen und sage ehrlich dazu, was erledigt wurde und was nicht. Du darfst zusätzlich ein Feld "thought" mit kurzer Begründung mitsenden.`;
+Regeln: Bei JEDER Frage zu Terminen, Aufgaben, Finanzen, Orten, Erinnerungen, Lernstand, Vorlesungen/Aufnahmen oder Dokumenteninhalten MUSST du zuerst das passende Werkzeug aufrufen — eine finale Antwort ohne vorherigen Werkzeugaufruf ist dann VERBOTEN (erfinde NIEMALS Werte). Für Fragen zu Unterlagen nutze study.retrieve (Dokumente listet study.documents) und belege jede Aussage mit den [Qn]-Quellen aus dem Werkzeugergebnis — Quellen zu erfinden ist VERBOTEN. Findet das Werkzeug nichts, sage ehrlich, dass die Unterlagen nichts enthalten. Für Fragen zu Orten, Ausflügen, Restaurants oder Cafés rufst du IMMER zuerst lifestyle.placesSearch auf und nennst nur echte Treffer (Name, Adresse und Öffnungszeiten nur aus dem Werkzeugergebnis, mit Quellenangabe) — Orte, Adressen, Öffnungszeiten oder Bewertungen zu erfinden ist VERBOTEN. „Merk dir …" speicherst du per memory.create (passende Kategorie wählen), statt es nur zuzusagen. Nur bei Begrüßung, Smalltalk oder Rückfragen darfst du direkt per "final" antworten. Schreib-Werkzeuge nur bei vollständigen Angaben, sonst frage per "final" nach. Deutsche Beträge ("24,50") werden zu Cent. Relative Daten löst du gegen Heute auf. Fasse Tool-Ergebnisse in der finalen Antwort zusammen und sage ehrlich dazu, was erledigt wurde und was nicht. Du darfst zusätzlich ein Feld "thought" mit kurzer Begründung mitsenden.`;
 }
 
 export const AGENT_CORRECTION =
@@ -336,6 +426,231 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const MONTH_KEY = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+function isRealDay(value: string): boolean {
+  if (!ISO_DAY.test(value)) return false;
+
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(5, 7));
+  const day = Number(value.slice(8, 10));
+  const probe = new Date(Date.UTC(year, month - 1, day));
+
+  return (
+    probe.getUTCFullYear() === year &&
+    probe.getUTCMonth() === month - 1 &&
+    probe.getUTCDate() === day
+  );
+}
+
+function isIntIn(value: unknown, min: number, max: number): boolean {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= min &&
+    value <= max
+  );
+}
+
+function argError(tool: string, field: string, expected: string): string {
+  return `${tool}: ungültiges Argument „${field}" (${expected}).`;
+}
+
+/**
+ * Validate the MODEL-settable args of a read tool against the registry
+ * contract (same bounds the tools document). Returns a German error
+ * message for the model, or null when the args may execute.
+ *
+ * Known keys are strict (a wrong type or an out-of-range number fails
+ * loudly instead of silently falling back to a default); unknown keys
+ * are ignored (the heuristic adapter reuses plan shapes with extra
+ * fields like `label`, and extra keys can neither invent nor leak
+ * data — every tool picks only its known fields).
+ */
+export function validateToolArgs(
+  tool: string,
+  args: Record<string, unknown>,
+): string | null {
+  // Optional fields accept explicit null as "unset" (the heuristic
+  // adapter sends monthKey: null for week-scoped summaries).
+  const set = (value: unknown): boolean =>
+    value !== undefined && value !== null;
+
+  switch (tool) {
+    case "calendar.upcoming":
+      if (set(args.days) && !isIntIn(args.days, 0, 60)) {
+        return argError(tool, "days", "Ganzzahl 0–60");
+      }
+      return null;
+    case "calendar.list": {
+      const from = args.from;
+      const to = args.to;
+
+      if (set(from) && (typeof from !== "string" || !isRealDay(from))) {
+        return argError(tool, "from", "gültiges Datum YYYY-MM-DD");
+      }
+
+      if (set(to) && (typeof to !== "string" || !isRealDay(to))) {
+        return argError(tool, "to", "gültiges Datum YYYY-MM-DD");
+      }
+
+      if (
+        typeof from === "string" &&
+        typeof to === "string" &&
+        from > to
+      ) {
+        return argError(tool, "to", "nicht vor „from“");
+      }
+
+      return null;
+    }
+    case "study.attention":
+      if (set(args.withinDays) && !isIntIn(args.withinDays, 0, 90)) {
+        return argError(tool, "withinDays", "Ganzzahl 0–90");
+      }
+      return null;
+    case "finance.monthSummary":
+    case "finance.largest":
+      if (
+        typeof args.monthKey !== "string" ||
+        !MONTH_KEY.test(args.monthKey)
+      ) {
+        return argError(tool, "monthKey", "Monat als YYYY-MM (erforderlich)");
+      }
+
+      if (
+        tool === "finance.largest" &&
+        set(args.limit) &&
+        !isIntIn(args.limit, 1, 20)
+      ) {
+        return argError(tool, "limit", "Ganzzahl 1–20");
+      }
+
+      return null;
+    case "finance.list":
+      if (set(args.limit) && !isIntIn(args.limit, 1, 50)) {
+        return argError(tool, "limit", "Ganzzahl 1–50");
+      }
+      return null;
+    case "finance.summary":
+      if (
+        set(args.monthKey) &&
+        (typeof args.monthKey !== "string" || !MONTH_KEY.test(args.monthKey))
+      ) {
+        return argError(tool, "monthKey", "Monat als YYYY-MM");
+      }
+      return null;
+    case "lifestyle.placesSearch": {
+      for (const field of ["query", "near"] as const) {
+        const value = args[field];
+
+        if (
+          set(value) &&
+          (typeof value !== "string" || value.length > 200)
+        ) {
+          return argError(tool, field, "Text, max. 200 Zeichen");
+        }
+      }
+
+      if (
+        set(args.category) &&
+        (typeof args.category !== "string" ||
+          ![
+            "nature",
+            "food",
+            "culture",
+            "sport",
+            "cinema",
+            "date",
+            "free",
+          ].includes(args.category))
+      ) {
+        return argError(
+          tool,
+          "category",
+          "eine App-Kategorie (nature, food, culture, sport, cinema, date, free)",
+        );
+      }
+
+      if (set(args.limit) && !isIntIn(args.limit, 1, 10)) {
+        return argError(tool, "limit", "Ganzzahl 1–10");
+      }
+
+      return null;
+    }
+    case "study.retrieve": {
+      const query = args.query;
+
+      if (typeof query !== "string" || query.trim() === "" || query.length > 500) {
+        return argError(tool, "query", "Suchtext 1–500 Zeichen (erforderlich)");
+      }
+
+      if (
+        set(args.documentId) &&
+        (typeof args.documentId !== "string" || args.documentId.trim() === "")
+      ) {
+        return argError(tool, "documentId", "Dokument-ID als Text");
+      }
+
+      if (set(args.limit) && !isIntIn(args.limit, 1, 10)) {
+        return argError(tool, "limit", "Ganzzahl 1–10");
+      }
+
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** Storage keys the registry requires, mapped to the loaded `AgentData`. */
+function hasRequiresKey(key: string, data: AgentData): boolean {
+  switch (key) {
+    case "jarvis-calendar-events":
+      return Array.isArray(data.events);
+    case "jarvis-tasks":
+      return Array.isArray(data.tasks);
+    case "jarvis-study":
+      return typeof data.study === "object" && data.study !== null;
+    case "jarvis-finance":
+      return typeof data.finance === "object" && data.finance !== null;
+    case "jarvis-lifestyle-places":
+      return Array.isArray(data.places);
+    case "jarvis-lifestyle-saved":
+      return Array.isArray(data.savedIds);
+    case "jarvis-lifestyle-plans":
+      return Array.isArray(data.plans);
+    case "jarvis-lifestyle-prefs":
+      return typeof data.prefs === "object" && data.prefs !== null;
+    case "jarvis-memory":
+      return Array.isArray(data.memory);
+    default:
+      return true;
+  }
+}
+
+/**
+ * Enforce the registry `requiresKeys`: the first missing storage key,
+ * or null when everything the tool needs is loaded. The tools
+ * re-validate contents; this guard catches unloaded modules before a
+ * read runs against them.
+ */
+export function missingRequiresKey(
+  tool: string,
+  data: AgentData,
+): string | null {
+  const definition = getToolDefinition(tool);
+
+  if (definition === null) return null;
+
+  for (const key of definition.requiresKeys) {
+    if (!hasRequiresKey(key, data)) return key;
+  }
+
+  return null;
+}
+
 /** Run one read tool: model args + caller-supplied data, never storage. */
 function runReadTool(
   id: string,
@@ -400,6 +715,20 @@ function runReadTool(
       return getUpcomingPlans({ plans: data.plans, todayISO: data.todayISO });
     case "memory.approved":
       return getApprovedMemory({ memory: data.memory, todayISO: data.todayISO });
+    case "lecture.overview":
+      return getLectureOverview({
+        sessions: data.sessions,
+        recordings: data.recordings,
+      });
+    case "briefing.today":
+      return getBriefingToday({
+        events: data.events,
+        tasks: data.tasks,
+        study: data.study,
+        finance: data.finance,
+        todayISO: data.todayISO,
+        nowTime: data.nowTime,
+      });
     default:
       return {
         ok: false,
@@ -414,12 +743,38 @@ function runReadTool(
 /**
  * Async reads first (caller-owned data: API or local store), then the
  * sync tools. Returns null only when the run was aborted mid-tool.
+ *
+ * Both paths validate first: model args against the registry contract,
+ * then the registry requiresKeys against the loaded data. Failures
+ * return honest `ok:false` domain results for the model to report —
+ * never silent fallbacks, never throws for bad args.
  */
 async function runReadToolAsync(
   id: string,
   args: Record<string, unknown>,
   options: AgentOptions,
 ): Promise<ToolResult<unknown> | null> {
+  const argsError = validateToolArgs(id, args);
+
+  if (argsError !== null) {
+    return {
+      ok: false,
+      error: { code: "invalid-input", message: argsError },
+    };
+  }
+
+  const missingKey = missingRequiresKey(id, options.data);
+
+  if (missingKey !== null) {
+    return {
+      ok: false,
+      error: {
+        code: "not-loaded",
+        message: `${id}: benötigte Daten sind nicht geladen (${missingKey}).`,
+      },
+    };
+  }
+
   const asyncRead = options.asyncReads?.[id];
 
   if (asyncRead === undefined) {
@@ -482,11 +837,11 @@ function toolResultContent(
   citationSources: CitationSource[],
 ): string {
   if (id !== "study.retrieve" || !result.ok) {
-    return truncateJson(result, TOOL_RESULT_MAX);
+    return truncateJsonSafe(result, TOOL_RESULT_MAX);
   }
 
   if (!isStudyRetrieval(result.data)) {
-    return truncateJson(
+    return truncateJsonSafe(
       { ok: false, error: "Ungültiges Suchergebnis (interner Fehler)." },
       TOOL_RESULT_MAX,
     );
@@ -503,7 +858,7 @@ function toolResultContent(
     return { marker, ...source };
   });
 
-  return truncateJson(
+  return truncateJsonSafe(
     {
       ok: true,
       data: {
@@ -532,10 +887,110 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
-function truncateJson(value: unknown, max: number): string {
+type StringRef = { parent: Record<string, unknown> | unknown[]; key: string | number };
+
+function collectStrings(value: unknown, into: StringRef[]): void {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const item = value[index];
+
+      if (typeof item === "string") {
+        into.push({ parent: value, key: index });
+      } else {
+        collectStrings(item, into);
+      }
+    }
+
+    return;
+  }
+
+  if (isRecord(value)) {
+    for (const key of Object.keys(value)) {
+      const item = value[key];
+
+      if (typeof item === "string") {
+        into.push({ parent: value, key });
+      } else {
+        collectStrings(item, into);
+      }
+    }
+  }
+}
+
+/** Shorten the single longest string (>= 80 chars); false when none. */
+function shrinkLongestString(root: unknown): boolean {
+  const refs: StringRef[] = [];
+  collectStrings(root, refs);
+
+  let best: StringRef | null = null;
+  let bestLength = 80;
+
+  for (const ref of refs) {
+    const current = ref.parent[ref.key as never] as unknown;
+
+    if (typeof current === "string" && current.length > bestLength) {
+      best = ref;
+      bestLength = current.length;
+    }
+  }
+
+  if (best === null) return false;
+
+  const current = best.parent[best.key as never] as string;
+  const half = Math.max(40, Math.floor(current.length / 2));
+  (best.parent as Record<string | number, unknown>)[best.key] =
+    `${current.slice(0, half)}…gekürzt`;
+
+  return true;
+}
+
+/**
+ * Serialize a tool result within `max` chars, ALWAYS as valid JSON.
+ * Long payloads shrink inside their longest string fields first (with
+ * a visible …gekürzt marker); when that cannot fit, a small shape
+ * summary preserves the `ok` flag and any error message. The old raw
+ * slice cut JSON mid-object, which downstream parsers (and the
+ * heuristic adapter) could not read at all.
+ */
+export function truncateJsonSafe(value: unknown, max: number): string {
   const raw = JSON.stringify(value) ?? "null";
 
-  return raw.length > max ? `${raw.slice(0, max)}…gekürzt` : raw;
+  if (raw.length <= max) return raw;
+
+  const clone: unknown = JSON.parse(raw) as unknown;
+
+  for (let round = 0; round < 12; round += 1) {
+    const current = JSON.stringify(clone) ?? "null";
+
+    if (current.length <= max) return current;
+    if (!shrinkLongestString(clone)) break;
+  }
+
+  const shrunk = JSON.stringify(clone) ?? "null";
+
+  if (shrunk.length <= max) return shrunk;
+
+  if (isRecord(value)) {
+    const summary: Record<string, unknown> = {
+      gekürzt: "Ergebnis zu lang für eine Antwort. Bitte Frage eingrenzen.",
+    };
+
+    if (typeof value.ok === "boolean") summary.ok = value.ok;
+    if (value.error !== undefined) summary.error = value.error;
+
+    return JSON.stringify(summary);
+  }
+
+  if (Array.isArray(value)) {
+    return JSON.stringify({
+      gekürzt: "Ergebnis zu lang für eine Antwort. Bitte Frage eingrenzen.",
+      anzahl: value.length,
+    });
+  }
+
+  return JSON.stringify({
+    gekürzt: "Ergebnis zu lang für eine Antwort. Bitte Frage eingrenzen.",
+  });
 }
 
 // ------------------------------------------------------------------- loop
@@ -588,13 +1043,14 @@ export async function runAgent(
 
   let mistakes = 0;
   let challenged = false;
+  let placeChallenged = false;
   let citationRepaired = false;
   const citationSources: CitationSource[] = [];
   const undos: AgentWriteUndo[] = [];
 
   for (let step = 0; step < maxSteps; step += 1) {
     if (options.signal?.aborted === true) {
-      return { status: "error", message: "Abgebrochen." };
+      return { status: "error", message: "Abgebrochen.", code: "aborted", retryable: true };
     }
 
     if (Date.now() - startedAt > timeBudgetMs) {
@@ -604,6 +1060,8 @@ export async function runAgent(
           options.locale === "ru"
             ? "Превышен лимит времени. Попробуй ещё раз."
             : "Zeitbudget überschritten. Versuche es erneut.",
+        code: "budget",
+        retryable: true,
       };
     }
 
@@ -612,12 +1070,23 @@ export async function runAgent(
     try {
       raw = await options.chat(messages);
     } catch (error: unknown) {
+      if (error instanceof AgentChatError) {
+        return {
+          status: "error",
+          message: error.message,
+          code: error.code,
+          retryable: error.retryable,
+        };
+      }
+
       return {
         status: "error",
         message:
           error instanceof Error && error.message !== ""
             ? error.message
             : "Unbekannter Fehler.",
+        code: "unknown",
+        retryable: true,
       };
     }
 
@@ -639,6 +1108,28 @@ export async function runAgent(
         messages.push({
           role: "user",
           content: bareFinalChallenge(options.locale),
+        });
+
+        continue;
+      }
+
+      // Place follow-up: a suspiciously long answer to a place question
+      // without a live search gets ONE "call the tool, never invent"
+      // round. Short finals pass (they are usually clarifying
+      // questions like "which city?").
+      if (
+        (options.challengeBareFinals ?? true) &&
+        !placeChallenged &&
+        granted.includes("read") &&
+        steps.every((entry) => entry.tool !== "lifestyle.placesSearch") &&
+        looksLikePlaceQuery(text) &&
+        envelope.answer.length > bareThreshold
+      ) {
+        placeChallenged = true;
+        messages.push({ role: "assistant", content: raw });
+        messages.push({
+          role: "user",
+          content: placeChallenge(options.locale),
         });
 
         continue;
@@ -686,7 +1177,12 @@ export async function runAgent(
       mistakes += 1;
 
       if (mistakes >= MAX_MISTAKES) {
-        return { status: "error", message: mistakeMessage(options.locale) };
+        return {
+          status: "error",
+          message: mistakeMessage(options.locale),
+          code: "model",
+          retryable: true,
+        };
       }
 
       messages.push({ role: "assistant", content: raw });
@@ -701,7 +1197,12 @@ export async function runAgent(
       mistakes += 1;
 
       if (mistakes >= MAX_MISTAKES) {
-        return { status: "error", message: mistakeMessage(options.locale) };
+        return {
+          status: "error",
+          message: mistakeMessage(options.locale),
+          code: "model",
+          retryable: true,
+        };
       }
 
       messages.push({ role: "assistant", content: raw });
@@ -724,7 +1225,12 @@ export async function runAgent(
       );
 
       if (result === null) {
-        return { status: "error", message: "Abgebrochen." };
+        return {
+          status: "error",
+          message: "Abgebrochen.",
+          code: "aborted",
+          retryable: true,
+        };
       }
 
       messages.push({ role: "assistant", content: raw });
@@ -743,14 +1249,13 @@ export async function runAgent(
         summary: result.ok ? "gelesen" : result.error.message,
       });
 
+      // A failed read is honest domain data (missing date, invalid
+      // input, provider unavailable) — the model reports it, so it
+      // must NOT count as a model mistake. Only protocol violations
+      // (bad envelopes, unknown tools, invalid write plans) abort
+      // the run; a stuck model still hits the step budget.
       if (result.ok) {
         mistakes = 0;
-      } else {
-        mistakes += 1;
-
-        if (mistakes >= MAX_MISTAKES) {
-          return { status: "error", message: mistakeMessage(options.locale) };
-        }
       }
 
       continue;
@@ -764,7 +1269,12 @@ export async function runAgent(
       mistakes += 1;
 
       if (mistakes >= MAX_MISTAKES) {
-        return { status: "error", message: mistakeMessage(options.locale) };
+        return {
+          status: "error",
+          message: mistakeMessage(options.locale),
+          code: "model",
+          retryable: true,
+        };
       }
 
       messages.push({ role: "assistant", content: raw });
@@ -786,7 +1296,12 @@ export async function runAgent(
       mistakes += 1;
 
       if (mistakes >= MAX_MISTAKES) {
-        return { status: "error", message: mistakeMessage(options.locale) };
+        return {
+          status: "error",
+          message: mistakeMessage(options.locale),
+          code: "model",
+          retryable: true,
+        };
       }
 
       messages.push({ role: "assistant", content: raw });
@@ -812,6 +1327,8 @@ export async function runAgent(
         finance: options.data.finance,
         calendar: options.stores.calendar,
         transactions: options.stores.transactions,
+        memories: options.stores.memories,
+        tasks: options.stores.tasks,
         locale: options.locale,
       },
     );
@@ -849,7 +1366,7 @@ export async function runAgent(
       messages.push({ role: "assistant", content: raw });
       messages.push({
         role: "tool",
-        content: truncateJson(
+        content: truncateJsonSafe(
           { ok: false, error: report.message },
           TOOL_RESULT_MAX,
         ),
@@ -862,7 +1379,7 @@ export async function runAgent(
     messages.push({ role: "assistant", content: raw });
     messages.push({
       role: "tool",
-      content: truncateJson({ ok: true, message: report.message }, TOOL_RESULT_MAX),
+      content: truncateJsonSafe({ ok: true, message: report.message }, TOOL_RESULT_MAX),
     });
     steps.push({ tool: envelope.id, ok: true, summary: report.message });
 
@@ -877,16 +1394,87 @@ export async function runAgent(
       options.locale === "ru"
         ? "Слишком много шагов. Уточни запрос и попробуй ещё раз."
         : "Zu viele Schritte für diese Anfrage. Präzisiere sie und versuche es erneut.",
+    code: "budget",
+    retryable: true,
   };
 }
 
 // --------------------------------------------------------------- transport
 
+export type ClassifiedServerError = {
+  message: string;
+  code: AgentErrorCause;
+  retryable: boolean;
+};
+
+/**
+ * Classify a failed inference response from its status + typed error
+ * envelope (`{ ok:false, error:{ code, message } }`). The server's
+ * German message is preserved verbatim; the code decides the cause
+ * label and whether re-sending can help. Exported for tests.
+ */
+export function classifyServerError(
+  status: number,
+  parsed: unknown,
+): ClassifiedServerError {
+  const fallback = `Serverfehler (${status}).`;
+  const errorRecord =
+    isRecord(parsed) && isRecord(parsed.error) ? parsed.error : null;
+  const message =
+    errorRecord !== null && typeof errorRecord.message === "string"
+      ? errorRecord.message
+      : fallback;
+  const code =
+    errorRecord !== null && typeof errorRecord.code === "string"
+      ? errorRecord.code
+      : null;
+
+  switch (code) {
+    case "unauthorized":
+      return { message, code: "auth", retryable: false };
+    case "bad-request":
+    case "not-found":
+    case "conflict":
+    case "payload-too-large":
+      return { message, code: "format", retryable: false };
+    case "upstream-error":
+    case "worker-unavailable":
+      return { message, code: "ollama", retryable: true };
+    case "migration-pending":
+      return { message, code: "supabase", retryable: true };
+    case "cloud-not-configured":
+      return { message, code: "provider", retryable: false };
+    default:
+      break;
+  }
+
+  if (status === 401) return { message, code: "auth", retryable: false };
+  if (status === 400) return { message, code: "format", retryable: false };
+  if (status === 503 || status === 502) {
+    return { message, code: "ollama", retryable: true };
+  }
+
+  return { message, code: "unknown", retryable: true };
+}
+
+function abortChatError(): AgentChatError {
+  return new AgentChatError("Abgebrochen.", "aborted", true);
+}
+
+function networkChatError(): AgentChatError {
+  return new AgentChatError(
+    "Keine Verbindung zum Server. Prüfe deine Verbindung und versuche es erneut.",
+    "network",
+    true,
+  );
+}
+
 /**
  * Production chat transport: POST the history to /api/llm/chat and
- * return the assistant content. Throws the server's German message
- * on failure so the loop can surface it honestly. An optional
- * signal aborts the request and surfaces as "Abgebrochen."
+ * return the assistant content. Failures throw an `AgentChatError`
+ * carrying the server's German message plus a classified cause and
+ * retry hint, so the loop can surface all three honestly. An
+ * optional signal aborts the request and surfaces as "Abgebrochen."
  */
 export function createApiChat(
   fetcher: typeof fetch = fetch,
@@ -894,7 +1482,7 @@ export function createApiChat(
 ): AgentChat {
   return async (messages: AgentMessage[]): Promise<string> => {
     if (signal !== undefined && signal.aborted) {
-      throw new Error("Abgebrochen.");
+      throw abortChatError();
     }
 
     let res: Response;
@@ -911,16 +1499,18 @@ export function createApiChat(
       });
     } catch {
       if (signal !== undefined && signal.aborted) {
-        throw new Error("Abgebrochen.");
+        throw abortChatError();
       }
 
-      throw new Error(
-        "Keine Verbindung zum Server. Prüfe deine Verbindung und versuche es erneut.",
-      );
+      throw networkChatError();
     }
 
     if (res.status === 401) {
-      throw new Error("Sitzung abgelaufen. Bitte melde dich erneut an.");
+      throw new AgentChatError(
+        "Sitzung abgelaufen. Bitte melde dich erneut an.",
+        "auth",
+        false,
+      );
     }
 
     let parsed: unknown = null;
@@ -928,7 +1518,13 @@ export function createApiChat(
     try {
       parsed = (await res.json()) as unknown;
     } catch {
-      throw new Error(`Serverfehler (${res.status}).`);
+      const classified = classifyServerError(res.status, null);
+
+      throw new AgentChatError(
+        classified.message,
+        classified.code,
+        classified.retryable,
+      );
     }
 
     if (
@@ -940,13 +1536,153 @@ export function createApiChat(
       return parsed.data.content;
     }
 
-    const message =
-      isRecord(parsed) &&
-      isRecord(parsed.error) &&
-      typeof parsed.error.message === "string"
-        ? parsed.error.message
-        : `Serverfehler (${res.status}).`;
+    const classified = classifyServerError(res.status, parsed);
 
-    throw new Error(message);
+    throw new AgentChatError(
+      classified.message,
+      classified.code,
+      classified.retryable,
+    );
   };
+}
+
+/**
+ * Streaming production transport: POST the history to
+ * /api/llm/chat/stream (SSE) and collect the assistant content.
+ * Tokens stream in as they generate (first byte fast, abort cuts
+ * the stream immediately); the loop still parses the COMPLETE
+ * envelope, so partial JSON never executes anything. `onToken`
+ * observes progress (optional); failures throw the server's German
+ * message, like the non-streaming transport.
+ */
+export function createApiChatStream(
+  fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
+  onToken?: (delta: string) => void,
+): AgentChat {
+  return async (messages: AgentMessage[]): Promise<string> => {
+    if (signal !== undefined && signal.aborted) {
+      throw abortChatError();
+    }
+
+    let res: Response;
+
+    try {
+      res = await fetcher("/api/llm/chat/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages,
+          options: { format: "json", think: false, temperature: 0 },
+        }),
+        ...(signal === undefined ? {} : { signal }),
+      });
+    } catch {
+      if (signal !== undefined && signal.aborted) {
+        throw abortChatError();
+      }
+
+      throw networkChatError();
+    }
+
+    if (res.status === 401) {
+      throw new AgentChatError(
+        "Sitzung abgelaufen. Bitte melde dich erneut an.",
+        "auth",
+        false,
+      );
+    }
+
+    if (!res.ok || res.body === null) {
+      throw await streamError(res);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let content = "";
+
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+
+        for (const event of events) {
+          for (const line of event.split("\n")) {
+            const payload = line.startsWith("data:") ? line.slice(5).trim() : "";
+
+            if (payload === "") continue;
+
+            let parsed: unknown = null;
+
+            try {
+              parsed = JSON.parse(payload) as unknown;
+            } catch {
+              continue;
+            }
+
+            if (!isRecord(parsed)) continue;
+
+            if (typeof parsed.token === "string") {
+              content += parsed.token;
+              onToken?.(parsed.token);
+            } else if (typeof parsed.error === "string") {
+              // Mid-stream failures come from the Ollama read itself.
+              throw new AgentChatError(parsed.error, "ollama", true);
+            }
+            // {"done":true,...} carries no text; loop ends at stream end.
+          }
+        }
+
+        if (signal !== undefined && signal.aborted) {
+          throw abortChatError();
+        }
+      }
+    } catch (error: unknown) {
+      try {
+        await reader.cancel();
+      } catch {
+        // Teardown only; the original error below is what matters.
+      }
+
+      if (error instanceof AgentChatError) throw error;
+
+      throw error instanceof Error && error.message !== ""
+        ? new AgentChatError(error.message, "unknown", true)
+        : new AgentChatError("Unbekannter Fehler.", "unknown", true);
+    }
+
+    if (content === "") {
+      throw new AgentChatError(
+        "Das KI-Modell hat eine leere Antwort geliefert. Versuche es erneut.",
+        "model",
+        true,
+      );
+    }
+
+    return content;
+  };
+}
+
+async function streamError(res: Response): Promise<AgentChatError> {
+  let parsed: unknown = null;
+
+  try {
+    parsed = (await res.json()) as unknown;
+  } catch {
+    // Fall through with null; the classifier emits the status message.
+  }
+
+  const classified = classifyServerError(res.status, parsed);
+
+  return new AgentChatError(
+    classified.message,
+    classified.code,
+    classified.retryable,
+  );
 }

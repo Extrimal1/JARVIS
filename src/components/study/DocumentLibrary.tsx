@@ -17,7 +17,7 @@ import {
   X,
 } from "lucide-react";
 import type { Entry } from "@/src/lib/study";
-import { useQuiz } from "@/src/lib/db/useModules";
+import { useQuiz, type StudyResource } from "@/src/lib/db/useModules";
 import type { ListResource } from "@/src/lib/db/useRemoteResource";
 import type { QuizQuestion } from "@/src/lib/quiz";
 import {
@@ -43,6 +43,7 @@ import {
 } from "@/src/lib/db/documents";
 import {
   explainInDocument,
+  extractDocumentTopics,
   generateQuestionsForDocument,
   getDocumentCoverage,
   getSummaryState,
@@ -50,6 +51,12 @@ import {
   summarizeNextSpan,
   synthesizeDocumentSummary,
 } from "@/src/lib/db/studyActions";
+import {
+  classifyTopicError,
+  formatTopicSummary,
+  runDocumentTopicExtraction,
+  topicCauseLabel,
+} from "@/src/lib/study/autoTopics";
 import type {
   DocumentCoverage,
   DocumentSummary,
@@ -124,10 +131,18 @@ type AiResult =
       insufficient: boolean;
     };
 
+type AutoTopicState = {
+  status: "running" | "done" | "error" | "skipped";
+  message: string;
+  retryable: boolean;
+};
+
 export function DocumentLibrary({
   subjects,
   onSaveMaterial,
   quizStore,
+  studyStore,
+  topics,
 }: {
   subjects: Entry[];
   onSaveMaterial: (entry: Entry) => Promise<void>;
@@ -137,6 +152,13 @@ export function DocumentLibrary({
    * to an internal store when used standalone.
    */
   quizStore?: ListResource<QuizQuestion>;
+  /**
+   * Shared study store + topics for automatic topic extraction
+   * after processing. Absent when used standalone (then the
+   * Themen-Ansicht extracts manually instead).
+   */
+  studyStore?: StudyResource;
+  topics?: Entry[];
 }) {
   const internalQuizStore = useQuiz();
   const questions = quizStore ?? internalQuizStore;
@@ -162,6 +184,7 @@ export function DocumentLibrary({
   const [editDescription, setEditDescription] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [processingId, setProcessingId] = useState<string | null>(null);
+  const [topicAuto, setTopicAuto] = useState<Record<string, AutoTopicState>>({});
   const [aiOpenId, setAiOpenId] = useState<string | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiSaving, setAiSaving] = useState(false);
@@ -183,6 +206,7 @@ export function DocumentLibrary({
     Record<string, DocumentSummary>
   >({});
   const sAbortRef = useRef<AbortController | null>(null);
+  const tAbortRef = useRef<AbortController | null>(null);
   const aiOpenRef = useRef<string | null>(null);
   const sBusy = sBusyId !== null;
   const [qBusyId, setQBusyId] = useState<string | null>(null);
@@ -219,6 +243,7 @@ export function DocumentLibrary({
     () => () => {
       qAbortRef.current?.abort();
       sAbortRef.current?.abort();
+      tAbortRef.current?.abort();
     },
     [],
   );
@@ -391,7 +416,11 @@ export function DocumentLibrary({
       setNotice(`„${meta.name}“ wurde hochgeladen.`);
       await refresh();
 
+      // Always report the topic state after processing: completed
+      // docs extract immediately, failed/unsupported/subjectless
+      // docs show an honest per-row reason instead of silence.
       await runProcessing(meta, savedFile);
+      await autoExtractTopics(meta);
     } catch (saveError) {
       setPendingError(
         saveError instanceof Error ? saveError.message : "Upload fehlgeschlagen.",
@@ -409,6 +438,8 @@ export function DocumentLibrary({
   }
 
   async function saveEdit(id: string) {
+    const previous = docs.find((item) => item.id === id) ?? null;
+
     try {
       const updated = await updateDocumentMeta(id, {
         subject: editSubject === "" ? null : editSubject,
@@ -423,6 +454,22 @@ export function DocumentLibrary({
         setDocs((current) =>
           current.map((item) => (item.id === id ? updated : item)),
         );
+
+        // A subject assigned late unblocks the automatic run: the
+        // same existing extraction (no second system) starts without
+        // requiring a re-upload or re-process.
+        const hadSubject =
+          previous?.subject !== null && previous?.subject !== "";
+        const hasSubject =
+          updated.subject !== null && updated.subject !== "";
+
+        if (
+          !hadSubject &&
+          hasSubject &&
+          updated.extractionStatus === "completed"
+        ) {
+          void autoExtractTopics(updated);
+        }
       }
 
       setEditingId(null);
@@ -448,7 +495,10 @@ export function DocumentLibrary({
     }
   }
 
-  async function runProcessing(meta: DocumentMeta, blob: Blob | null) {
+  async function runProcessing(
+    meta: DocumentMeta,
+    blob: Blob | null,
+  ): Promise<ProcessResponse | null> {
     await updateDocumentMeta(meta.id, { extractionStatus: "processing" });
     await refresh();
 
@@ -459,6 +509,8 @@ export function DocumentLibrary({
         CLOUD_ENABLED ? null : blob,
       );
       reportProcessResult(meta.name, result);
+
+      return result;
     } catch (processError) {
       await updateDocumentMeta(meta.id, { extractionStatus: "failed" });
       setError(
@@ -466,8 +518,138 @@ export function DocumentLibrary({
           ? processError.message
           : "Verarbeitung fehlgeschlagen.",
       );
+
+      return null;
     } finally {
       await refresh();
+    }
+  }
+
+  /**
+   * Automatic topic extraction after successful processing: same
+   * span extraction, merge, and store as the manual Themen run —
+   * no second system. Only starts on completed docs with a
+   * subject (topics link doc + subject); everything else reports
+   * honestly per row with a retry button.
+   */
+  async function autoExtractTopics(doc: DocumentMeta) {
+    if (studyStore === undefined || topics === undefined) return;
+
+    const store = studyStore;
+    const snapshot = topics;
+    let fresh: DocumentMeta | undefined;
+
+    try {
+      fresh = (await listDocuments()).find((item) => item.id === doc.id);
+    } catch {
+      fresh = undefined;
+    }
+
+    const subject = fresh?.subject ?? doc.subject;
+    const status = fresh?.extractionStatus ?? doc.extractionStatus;
+
+    if (status !== "completed") {
+      const message =
+        status === "unsupported"
+          ? "Kein extrahierbarer Text (z. B. Scan ohne OCR) — keine Themen."
+          : status === "failed"
+            ? "Texterkennung fehlgeschlagen — erneut verarbeiten, um Themen zu erhalten."
+            : "Dokument ist noch nicht verarbeitet.";
+      // Still-processing docs can be retried once processing
+      // finishes; failed/unsupported need a re-process, not a
+      // topic retry.
+      const retryable =
+        status !== "unsupported" && status !== "failed";
+
+      setTopicAuto((current) => ({
+        ...current,
+        [doc.id]: {
+          status: "skipped",
+          message,
+          retryable,
+        },
+      }));
+
+      return;
+    }
+
+    if (subject === null || subject === "") {
+      setTopicAuto((current) => ({
+        ...current,
+        [doc.id]: {
+          status: "skipped",
+          message:
+            "Kein Fach zugeordnet — Fach zuordnen, dann hier erneut versuchen, um Themen zu erhalten.",
+          retryable: true,
+        },
+      }));
+
+      return;
+    }
+
+    tAbortRef.current?.abort();
+
+    const controller = new AbortController();
+
+    tAbortRef.current = controller;
+    setTopicAuto((current) => ({
+      ...current,
+      [doc.id]: {
+        status: "running",
+        message: "Themen werden automatisch extrahiert …",
+        retryable: false,
+      },
+    }));
+
+    try {
+      const summary = await runDocumentTopicExtraction({
+        documentId: doc.id,
+        subject,
+        locale,
+        topics: snapshot,
+        makeId: createId,
+        call: (coveredLabels, maxSpans) =>
+          extractDocumentTopics(doc.id, locale, coveredLabels, maxSpans, fetch),
+        store,
+        signal: controller.signal,
+        onProgress: (progress) => {
+          setTopicAuto((current) => ({
+            ...current,
+            [doc.id]: {
+              status: "running",
+              message: `${progress.spansDone.length} Abschnitte · +${progress.created} neu, ${progress.merged} ergänzt`,
+              retryable: false,
+            },
+          }));
+        },
+      });
+
+      const finished =
+        summary.done && summary.exhaustedLabels.length === 0;
+
+      setTopicAuto((current) => ({
+        ...current,
+        [doc.id]: {
+          status: finished ? "done" : "error",
+          message: finished
+            ? `Themen: ${formatTopicSummary(summary)}`
+            : summary.exhaustedLabels.length > 0
+              ? `Themen teilweise: ${formatTopicSummary(summary)}`
+              : `Themen unvollständig: ${formatTopicSummary(summary)}`,
+          retryable: !finished,
+        },
+      }));
+    } catch (extractFailed) {
+      const classified = classifyTopicError(extractFailed);
+
+      setTopicAuto((current) => ({
+        ...current,
+        [doc.id]: {
+          status: "error",
+          message: `Ursache: ${topicCauseLabel(classified.cause)} — ${classified.detail}`,
+          retryable: classified.retryable,
+        },
+      }));
     }
   }
 
@@ -487,6 +669,7 @@ export function DocumentLibrary({
       }
 
       await runProcessing(doc, blob);
+      await autoExtractTopics(doc);
     } catch (reprocessError) {
       setError(
         reprocessError instanceof Error
@@ -1404,6 +1587,48 @@ export function DocumentLibrary({
                           )}
                         </div>
 
+                        {topicAuto[doc.id] !== undefined && (
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <p
+                              role={
+                                topicAuto[doc.id]?.status === "error"
+                                  ? "alert"
+                                  : "status"
+                              }
+                              className={`flex min-w-0 flex-1 items-center gap-1.5 text-[11px] leading-4 ${
+                                topicAuto[doc.id]?.status === "error"
+                                  ? "text-rose-300"
+                                  : topicAuto[doc.id]?.status === "done"
+                                    ? "text-emerald-300"
+                                    : topicAuto[doc.id]?.status === "running"
+                                      ? "text-cyan-200"
+                                      : "text-slate-500"
+                              }`}
+                            >
+                              {topicAuto[doc.id]?.status === "running" && (
+                                <Loader2
+                                  size={12}
+                                  className="shrink-0 motion-safe:animate-spin"
+                                />
+                              )}
+                              <span className="break-words">
+                                {topicAuto[doc.id]?.message}
+                              </span>
+                            </p>
+                            {topicAuto[doc.id]?.retryable === true &&
+                              topicAuto[doc.id]?.status !== "running" && (
+                                <button
+                                  onClick={() => void autoExtractTopics(doc)}
+                                  className="shrink-0 rounded-lg border border-white/10 px-2 py-1 text-[11px] text-slate-300 transition hover:border-cyan-300/30"
+                                >
+                                  {topicAuto[doc.id]?.status === "error"
+                                    ? "Erneut versuchen"
+                                    : "Weiter"}
+                                </button>
+                              )}
+                          </div>
+                        )}
+
                         {doc.description !== "" && (
                           <p className="mt-2 line-clamp-2 break-words text-xs leading-5 text-slate-500">
                             {doc.description}
@@ -1680,6 +1905,7 @@ export function DocumentLibrary({
 
       {previewDoc !== null && (
         <DocumentPreview
+          key={previewDoc.id}
           doc={previewDoc}
           onClose={() => setPreviewId(null)}
           onDownload={() => downloadDoc(previewDoc)}

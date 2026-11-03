@@ -34,18 +34,31 @@ import {
 } from "@/src/lib/finance";
 import { normalizeDescription } from "@/src/lib/finance/categories";
 import {
+  createMemoryEntry,
+  type MemoryCategory,
+  type MemoryEntry,
+} from "@/src/lib/memory";
+import { isTask, type Task } from "@/src/lib/tasks";
+import {
   type AssistantLocale,
   type AssistantPlan,
+  type AssistantQuery,
   type EventPatch,
   type EventRef,
   type NewEventFields,
+  type NewMemoryFields,
+  type NewTaskFields,
   type NewTransactionFields,
 } from "./actions";
 
-/** Actionable plans (clarify/unsupported render directly, no executor). */
+/**
+ * Actionable plans (clarify/unsupported render directly, no executor;
+ * read-only `AssistantQuery` plans run in the agent loop as read tools,
+ * never here).
+ */
 export type ActionPlan = Exclude<
   AssistantPlan,
-  { type: "clarify" } | { type: "unsupported" }
+  { type: "clarify" } | { type: "unsupported" } | AssistantQuery
 >;
 
 export type CalendarStore = {
@@ -62,11 +75,25 @@ export type FinanceStore = {
   deleteTransaction: (id: string) => Promise<RemoteResult<null>>;
 };
 
+export type MemoryStore = {
+  saveMemory: (entry: MemoryEntry) => Promise<RemoteResult<MemoryEntry>>;
+  deleteMemory: (id: string) => Promise<RemoteResult<null>>;
+};
+
+export type TaskStore = {
+  saveTask: (task: Task) => Promise<RemoteResult<Task>>;
+  deleteTask: (id: string) => Promise<RemoteResult<null>>;
+};
+
 export type ExecutorDeps = {
   events: CalendarEvent[];
   finance: FinanceData;
   calendar: CalendarStore;
   transactions: FinanceStore;
+  /** Memory writes need this; absent stores fail honestly, never guess. */
+  memories?: MemoryStore;
+  /** Task writes need this; absent stores fail honestly, never guess. */
+  tasks?: TaskStore;
   locale: AssistantLocale;
 };
 
@@ -75,7 +102,9 @@ export type UndoAction =
   | { kind: "restore-event"; event: CalendarEvent }
   | { kind: "restore-event-patch"; id: string; previous: CalendarEvent }
   | { kind: "remove-transaction"; id: string }
-  | { kind: "restore-transaction"; transaction: Transaction };
+  | { kind: "restore-transaction"; transaction: Transaction }
+  | { kind: "remove-memory"; id: string }
+  | { kind: "remove-task"; id: string };
 
 export type PendingAction =
   | {
@@ -175,6 +204,10 @@ type Strings = {
   budgetUsed: (pct: number, budget: string) => string;
   budgetExceeded: string;
   nonEuroNote: (count: number) => string;
+  memorySaved: (title: string, category: string) => string;
+  memoryUnavailable: string;
+  taskSaved: (title: string, time: string, priority: string) => string;
+  taskUnavailable: string;
 };
 
 const STRINGS: Record<AssistantLocale, Strings> = {
@@ -221,6 +254,14 @@ const STRINGS: Record<AssistantLocale, Strings> = {
     budgetExceeded: " Budget überschritten!",
     nonEuroNote: (count) =>
       ` (${count} Fremdwährungsbuchungen nicht enthalten.)`,
+    memorySaved: (title, category) =>
+      `Gemerkt (${category}): „${title}“.`,
+    memoryUnavailable:
+      "Der Speicher ist gerade nicht verfügbar — es wurde nichts gespeichert.",
+    taskSaved: (title, time, priority) =>
+      `Aufgabe gespeichert: „${title}“ · ${time} · ${priority}.`,
+    taskUnavailable:
+      "Die Aufgabenliste ist gerade nicht verfügbar — es wurde nichts gespeichert.",
   },
   ru: {
     undo: "Отменить",
@@ -261,6 +302,11 @@ const STRINGS: Record<AssistantLocale, Strings> = {
     budgetUsed: (pct, budget) => ` Бюджет использован на ${pct} % из ${budget}.`,
     budgetExceeded: " Бюджет превышен!",
     nonEuroNote: (count) => ` (без ${count} опер. в валюте).`,
+    memorySaved: (title, category) => `Запомнил (${category}): «${title}».`,
+    memoryUnavailable: "Хранилище сейчас недоступно — ничего не сохранено.",
+    taskSaved: (title, time, priority) =>
+      `Задача сохранена: «${title}» · ${time} · ${priority}.`,
+    taskUnavailable: "Список задач сейчас недоступен — ничего не сохранено.",
   },
 };
 
@@ -489,6 +535,88 @@ async function executeFinanceCreate(
     href: "/finance",
     undoLabel: strings.undo,
     undo: { kind: "remove-transaction", id: saved.id },
+  };
+}
+
+async function executeMemoryCreate(
+  id: string,
+  fields: NewMemoryFields,
+  deps: ExecutorDeps,
+): Promise<ExecutionReport> {
+  const strings = STRINGS[deps.locale];
+  const store = deps.memories;
+
+  if (store === undefined) {
+    return { status: "error", message: strings.memoryUnavailable };
+  }
+
+  const built = createMemoryEntry({
+    category: fields.category as MemoryCategory,
+    title: fields.title,
+    content: fields.content,
+    origin: "user",
+  });
+
+  if (built === null) {
+    return { status: "error", message: strings.invalid };
+  }
+
+  const entry: MemoryEntry = { ...built, id };
+  const result = await store.saveMemory(entry);
+
+  if (!result.ok) {
+    return { status: "error", message: strings.saveFailed(result.error) };
+  }
+
+  return {
+    status: "done",
+    message: strings.memorySaved(result.data.title, result.data.category),
+    href: "/memory",
+    undoLabel: strings.undo,
+    undo: { kind: "remove-memory", id: result.data.id },
+  };
+}
+
+async function executeTaskCreate(
+  id: string,
+  fields: NewTaskFields,
+  deps: ExecutorDeps,
+): Promise<ExecutionReport> {
+  const strings = STRINGS[deps.locale];
+  const store = deps.tasks;
+
+  if (store === undefined) {
+    return { status: "error", message: strings.taskUnavailable };
+  }
+
+  const task: Task = {
+    id,
+    title: fields.title,
+    time: fields.time,
+    done: false,
+    priority: fields.priority,
+  };
+
+  if (!isTask(task)) {
+    return { status: "error", message: strings.invalid };
+  }
+
+  const result = await store.saveTask(task);
+
+  if (!result.ok) {
+    return { status: "error", message: strings.saveFailed(result.error) };
+  }
+
+  return {
+    status: "done",
+    message: strings.taskSaved(
+      result.data.title,
+      result.data.time,
+      result.data.priority,
+    ),
+    href: "/#aufgaben",
+    undoLabel: strings.undo,
+    undo: { kind: "remove-task", id: result.data.id },
   };
 }
 
@@ -755,6 +883,10 @@ async function runPlan(
       return executeFinanceList(plan.limit, deps);
     case "finance.summary":
       return executeFinanceSummary(plan, deps);
+    case "memory.create":
+      return executeMemoryCreate(key, plan.entry, deps);
+    case "tasks.create":
+      return executeTaskCreate(key, plan.task, deps);
   }
 }
 
@@ -846,6 +978,26 @@ export async function executeUndo(
     case "restore-transaction":
       result = await deps.transactions.saveTransaction(undo.transaction);
       break;
+    case "remove-memory": {
+      const store = deps.memories;
+
+      if (store === undefined) {
+        return { ok: false, message: strings.memoryUnavailable };
+      }
+
+      result = await store.deleteMemory(undo.id);
+      break;
+    }
+    case "remove-task": {
+      const store = deps.tasks;
+
+      if (store === undefined) {
+        return { ok: false, message: strings.taskUnavailable };
+      }
+
+      result = await store.deleteTask(undo.id);
+      break;
+    }
   }
 
   if (!result.ok) {

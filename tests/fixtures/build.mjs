@@ -230,8 +230,142 @@ function buildTxt() {
   writeFileSync(join(DIR, "sample.txt"), lines.join("\n"), "utf8");
 }
 
+// ------------------------------------------------------------------ deck
+// Multi-slide PPTX for the topic-extraction regression tests: six
+// slide files in shuffled presentation order [3,1,5,2,4,6] (file5
+// is empty, so position 3 is the gap), slide2 notes via rels,
+// slide4 notes via same-number fallback, slide4 with a table,
+// slide6 with XML entities.
+
+function buildDeck() {
+  const slide = (lines) => `<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
+<p:sp><p:txBody>${lines
+    .map((line) => `<a:p><a:r><a:t>${line}</a:t></a:r></a:p>`)
+    .join("")}</p:txBody></p:sp>
+</p:spTree></p:cSld></p:sld>`;
+  const notes = (lines) => `<?xml version="1.0" encoding="UTF-8"?>
+<p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
+<p:sp><p:txBody>${lines
+    .map((line) => `<a:p><a:r><a:t>${line}</a:t></a:r></a:p>`)
+    .join("")}</p:txBody></p:sp>
+</p:spTree></p:cSld></p:notes>`;
+  const tableSlide = `<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
+<p:sp><p:txBody><a:p><a:r><a:t>Genetik nach Mendel</a:t></a:r></a:p><a:p><a:r><a:t>Dominante und rezessive Merkmale bestimmen die Nachkommen.</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:txBody><a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Merkmal</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>Ausprägung</a:t></a:r></a:p></a:txBody></a:tc></a:tr><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Erbse</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>rund oder runzlig</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></p:txBody></p:sp>
+</p:spTree></p:cSld></p:sld>`;
+  const emptySlide = `<?xml version="1.0" encoding="UTF-8"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree></p:spTree></p:cSld></p:sld>`;
+  const types = `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>`;
+  const presentation = `<?xml version="1.0" encoding="UTF-8"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst>
+<p:sldId r:id="rId3"/><p:sldId r:id="rId1"/><p:sldId r:id="rId5"/><p:sldId r:id="rId2"/><p:sldId r:id="rId4"/><p:sldId r:id="rId6"/>
+</p:sldIdLst></p:presentation>`;
+  const presentationRels = `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/>
+<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide3.xml"/>
+<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide4.xml"/>
+<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide5.xml"/>
+<Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide6.xml"/>
+</Relationships>`;
+  const slide2Rels = `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide2.xml"/>
+</Relationships>`;
+
+  writeFileSync(
+    join(DIR, "sample-deck.pptx"),
+    zipArchive([
+      { name: "[Content_Types].xml", data: Buffer.from(types, "utf8"), method: 0 },
+      { name: "ppt/presentation.xml", data: Buffer.from(presentation, "utf8"), method: 8 },
+      { name: "ppt/_rels/presentation.xml.rels", data: Buffer.from(presentationRels, "utf8"), method: 8 },
+      {
+        name: "ppt/slides/slide1.xml",
+        data: Buffer.from(
+          slide([
+            "Photosynthese: Grundlagen der Energieumwandlung.",
+            "Chlorophyll fängt Lichtenergie in den Blättern ein.",
+            "Wasser und Kohlenstoffdioxid sind die Ausgangsstoffe der Reaktion.",
+          ]),
+          "utf8",
+        ),
+        method: 8,
+      },
+      {
+        name: "ppt/slides/slide2.xml",
+        data: Buffer.from(
+          slide([
+            "Zellatmung im Überblick.",
+            "Glykolyse spaltet Glukose im Zytoplasma in Pyruvat.",
+            "Citratzyklus läuft in den Mitochondrien und liefert Energie.",
+          ]),
+          "utf8",
+        ),
+        method: 8,
+      },
+      {
+        name: "ppt/slides/slide3.xml",
+        data: Buffer.from(
+          slide([
+            "Biologie Klausur: Themenübersicht.",
+            "Alle prüfungsrelevanten Kapitel von Photosynthese bis Ökologie im Überblick.",
+          ]),
+          "utf8",
+        ),
+        method: 8,
+      },
+      {
+        name: "ppt/slides/slide4.xml",
+        data: Buffer.from(tableSlide, "utf8"),
+        method: 8,
+      },
+      {
+        name: "ppt/slides/slide5.xml",
+        data: Buffer.from(emptySlide, "utf8"),
+        method: 8,
+      },
+      {
+        name: "ppt/slides/slide6.xml",
+        data: Buffer.from(
+          slide([
+            "Ökologie &amp; Umwelt: Zusammenhänge verstehen.",
+            "Nahrungsketten &amp; Nahrungsnetze erklären den Energiefluss.",
+            "Stoffkreisläufe im Ökosystem Wald schließen den Kreislauf.",
+          ]),
+          "utf8",
+        ),
+        method: 8,
+      },
+      {
+        name: "ppt/slides/_rels/slide2.xml.rels",
+        data: Buffer.from(slide2Rels, "utf8"),
+        method: 8,
+      },
+      {
+        name: "ppt/notesSlides/notesSlide2.xml",
+        data: Buffer.from(
+          notes(["Sprechnotiz zu Zellatmung: ATP-Ausbeute von Glykolyse und Citratzyklus ausführlich erklären."]),
+          "utf8",
+        ),
+        method: 8,
+      },
+      {
+        name: "ppt/notesSlides/notesSlide4.xml",
+        data: Buffer.from(
+          notes(["Notiz zu Mendel: Erbsenexperimente mit Kreuzungsschema erwähnen."]),
+          "utf8",
+        ),
+        method: 8,
+      },
+    ]),
+  );
+}
+
 buildPdf();
 buildDocx();
 buildPptx();
+buildDeck();
 buildTxt();
 console.log("fixtures written to", DIR);

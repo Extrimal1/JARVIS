@@ -1,5 +1,5 @@
 /**
- * Study document storage for the frontend-only prototype.
+ * Study document storage (local-first IndexedDB library).
  *
  * Binary blobs, extracted text, and metadata live in three separate
  * IndexedDB object stores so the library can list metadata without

@@ -27,23 +27,41 @@ export async function apiUnknown(
   method: string,
   body?: unknown,
 ): Promise<RemoteResult<unknown>> {
-  let res: Response;
+  let res: Response | null = null;
 
-  try {
-    res = await fetch(path, {
-      method,
-      headers:
-        body === undefined ? {} : { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-  } catch {
-    if (typeof navigator !== "undefined" && !navigator.onLine) {
-      return {
-        ok: false,
-        error: "Du bist offline. Verbinde dich und versuche es erneut.",
-      };
+  // GETs retry once on network failure; mutations never auto-retry
+  // (a retry could double-apply — instead writes serialize via the
+  // per-hook `inflight` flag and use client-generated UUIDs, so a
+  // manual retry surfaces HTTP 409 conflict instead of duplicating).
+  const attempts = method === "GET" ? 2 : 1;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
     }
 
+    try {
+      res = await fetch(path, {
+        method,
+        headers:
+          body === undefined ? {} : { "Content-Type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+
+      break;
+    } catch {
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        return {
+          ok: false,
+          error: "Du bist offline. Verbinde dich und versuche es erneut.",
+        };
+      }
+
+      res = null;
+    }
+  }
+
+  if (res === null) {
     return {
       ok: false,
       error: "Keine Verbindung zum Server. Bitte versuche es erneut.",
@@ -78,6 +96,86 @@ export async function apiUnknown(
   }
 
   return { ok: true, data: (parsed as { data: unknown }).data };
+}
+
+export type BytesResult =
+  | { ok: true; blob: Blob; contentType: string }
+  | { ok: false; error: string; status: number };
+
+/**
+ * GET raw bytes (document downloads/previews). Same transport rules
+ * as `apiUnknown` — one retry on network failure, offline detection,
+ * hard navigation on 401 — but the body is a Blob, not JSON. Error
+ * responses still parse the typed `{ ok:false, error }` envelope so
+ * callers can show the server's message; `status` lets callers map
+ * 404 (genuinely missing) to null while throwing on real failures.
+ */
+export async function apiBytes(path: string): Promise<BytesResult> {
+  let res: Response | null = null;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+
+    try {
+      res = await fetch(path, { method: "GET" });
+
+      break;
+    } catch {
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        return {
+          ok: false,
+          error: "Du bist offline. Verbinde dich und versuche es erneut.",
+          status: 0,
+        };
+      }
+
+      res = null;
+    }
+  }
+
+  if (res === null) {
+    return {
+      ok: false,
+      error: "Keine Verbindung zum Server. Bitte versuche es erneut.",
+      status: 0,
+    };
+  }
+
+  if (!res.ok) {
+    if (res.status === 401) {
+      // Hard navigation clears all client state on session expiry.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+      window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+
+      return { ok: false, error: "Sitzung abgelaufen.", status: 401 };
+    }
+
+    let message = `Serverfehler (${res.status}).`;
+
+    try {
+      const parsed: unknown = await res.json();
+
+      if (
+        isRecord(parsed) &&
+        isRecord(parsed.error) &&
+        typeof parsed.error.message === "string"
+      ) {
+        message = parsed.error.message;
+      }
+    } catch {
+      // Keep the generic status message.
+    }
+
+    return { ok: false, error: message, status: res.status };
+  }
+
+  return {
+    ok: true,
+    blob: await res.blob(),
+    contentType: res.headers.get("content-type") ?? "",
+  };
 }
 
 export type ListResource<T extends { id: string }> = {

@@ -355,6 +355,43 @@ export const ASSISTANT_TOOLS: ToolDefinition[] = [
     requiresKeys: ["jarvis-lifestyle-plans"],
   },
   {
+    id: "lifestyle.placesSearch",
+    title: "Orte live suchen",
+    description:
+      "Sucht live über OpenStreetMap (Nominatim für Text und Geokodierung, Overpass für die Kategorie-Umkreissuche) nach echten Orten mit Adresse und Koordinaten. Liefert nie erfundene Bewertungen, Preise oder Öffnungszeiten; leere Treffer und Anbieterfehler werden ehrlich gemeldet. Braucht Suchtext oder Suchumgebung plus ggf. Kategorie; gespeicherte Vorlieben (Stadt, Standort, Umkreis) gelten als Standard.",
+    permission: "read",
+    inputs: [
+      {
+        name: "query",
+        type: "string?",
+        required: false,
+        description: "Suchtext, z. B. Café oder Museum (1–200 Zeichen).",
+      },
+      {
+        name: "near",
+        type: "string?",
+        required: false,
+        description:
+          "Stadt oder Ort als Suchumgebung (Standard: gespeicherte Stadt).",
+      },
+      {
+        name: "category",
+        type: "string?",
+        required: false,
+        description:
+          "Eine App-Kategorie: nature, food, culture, sport, cinema, date, free.",
+      },
+      {
+        name: "limit",
+        type: "number?",
+        required: false,
+        description: "Max. Treffer (1–10, Standard 5).",
+      },
+    ],
+    output: "LivePlaceSearch",
+    requiresKeys: [],
+  },
+  {
     id: "memory.approved",
     title: "Freigegebene Erinnerungen",
     description:
@@ -447,6 +484,23 @@ export const ASSISTANT_TOOLS: ToolDefinition[] = [
     requiresKeys: [],
   },
   {
+    id: "tasks.create",
+    title: "Aufgabe erstellen",
+    description:
+      "Erstellt eine Aufgabe über den Aufgaben-Store (sofort, mit Undo). Nur als AssistantPlan vorschlagen; Ausführung und Validierung übernimmt der Executor. Erscheint im Dashboard.",
+    permission: "write",
+    inputs: [
+      {
+        name: "task",
+        type: "NewTaskFields",
+        required: true,
+        description: "Titel, Zeit (HH:MM oder freie Angabe), Priorität (Niedrig/Mittel/Hoch).",
+      },
+    ],
+    output: "Task",
+    requiresKeys: [],
+  },
+  {
     id: "study.documents",
     title: "Dokumente auflisten",
     description:
@@ -455,6 +509,61 @@ export const ASSISTANT_TOOLS: ToolDefinition[] = [
     inputs: [],
     output: "StudyDocuments",
     requiresKeys: [],
+  },
+  {
+    id: "lecture.overview",
+    title: "Vorlesungen im Überblick",
+    description:
+      "Sitzungen und Aufnahmen der lokalen Vorlesungsbibliothek (nur Metadaten: Titel, Sprache, Dauer, Status — nie Audio).",
+    permission: "read",
+    inputs: [
+      {
+        name: "sessions",
+        type: "LectureSession[]",
+        required: true,
+        description: "Validierte Vorlesungssitzungen.",
+      },
+      {
+        name: "recordings",
+        type: "LocalRecording[]",
+        required: true,
+        description: "Validierte Aufnahmen.",
+      },
+    ],
+    output: "LectureOverview",
+    requiresKeys: [],
+  },
+  {
+    id: "memory.create",
+    title: "Erinnerung speichern",
+    description:
+      "Speichert eine Erinnerung des Nutzers (Kategorie, Titel, Inhalt) über den Memory-Store (sofort, mit Undo). Nur als AssistantPlan vorschlagen; Ausführung und Validierung übernimmt der Executor.",
+    permission: "write",
+    inputs: [
+      {
+        name: "entry",
+        type: "NewMemoryFields",
+        required: true,
+        description: "Kategorie (preferences/goals/study/finance/lifestyle/assistant), Titel, Inhalt.",
+      },
+    ],
+    output: "MemoryEntry",
+    requiresKeys: [],
+  },
+  {
+    id: "briefing.today",
+    title: "Tagesbriefing",
+    description:
+      "Tagesübersicht aus echten Daten: heutige Termine, offene Aufgaben, Prüfungen/Fristen und Monatsfinanzen. Fragt nach Tagesbriefing, Tagesübersicht oder „was steht heute an“, ist das das passende Werkzeug.",
+    permission: "read",
+    inputs: [],
+    output: "BriefingToday",
+    requiresKeys: [
+      "jarvis-calendar-events",
+      "jarvis-tasks",
+      "jarvis-study",
+      "jarvis-finance",
+    ],
   },
   {
     id: "study.retrieve",

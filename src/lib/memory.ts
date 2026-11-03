@@ -12,6 +12,13 @@ import { parseISODateLocal } from "@/src/lib/calendar";
 
 export const MEMORY_STORAGE_KEY = "jarvis-memory";
 export const MEMORY_SCHEMA_VERSION = 1;
+/**
+ * Local kill-switch: "1" (default) = the assistant may use approved
+ * memory; "0" = memory stays stored but is invisible to the assistant
+ * and the dashboard. Conversation context (this chat) is always
+ * temporary and never lands in memory without explicit approval.
+ */
+export const MEMORY_ENABLED_KEY = "jarvis-memory-enabled";
 
 export const MEMORY_CATEGORIES = [
   "preferences",
@@ -221,4 +228,42 @@ export function detectSensitiveHint(text: string): string[] {
   }
 
   return found;
+}
+
+/**
+ * Parse the memory kill-switch. Anything but "0" means enabled, so a
+ * missing key (fresh profile) defaults to enabled. Pure: the caller
+ * passes the stored value.
+ */
+export function parseMemoryEnabled(stored: string | null): boolean {
+  return stored !== "0";
+}
+
+/**
+ * Read the kill-switch in the browser. Server-side (no window) always
+ * returns true — disabling is a local UI control, never a way to hide
+ * stored data from its owner.
+ */
+export function isMemoryEnabledClient(): boolean {
+  if (typeof window === "undefined") return true;
+
+  try {
+    return parseMemoryEnabled(window.localStorage.getItem(MEMORY_ENABLED_KEY));
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Entries visible to the assistant + dashboard: only when enabled, and
+ * only the active (approved, unexpired, unarchived) subset.
+ */
+export function visibleMemory(
+  entries: MemoryEntry[],
+  todayISO: string,
+  enabled: boolean,
+): MemoryEntry[] {
+  if (!enabled) return [];
+
+  return activeMemory(entries, todayISO);
 }

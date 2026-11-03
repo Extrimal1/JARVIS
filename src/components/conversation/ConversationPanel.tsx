@@ -42,6 +42,35 @@ function recognitionToLocale(lang: RecognitionLang): AssistantLocale {
   return lang === "ru-RU" ? "ru" : "de";
 }
 
+const CAUSE_LABEL: Record<AssistantLocale, Record<string, string>> = {
+  de: {
+    ollama: "KI-Modell (Ollama)",
+    supabase: "Cloud-Backend",
+    provider: "Modell-Konfiguration",
+    format: "Anfrageformat",
+    network: "Netzwerk",
+    auth: "Sitzung",
+    budget: "Zeitbudget",
+    model: "Modellantwort",
+    persist: "Verlaufsspeicher",
+    aborted: "Abgebrochen",
+    unknown: "Unbekannt",
+  },
+  ru: {
+    ollama: "ИИ-модель (Ollama)",
+    supabase: "Облако",
+    provider: "Настройка модели",
+    format: "Формат запроса",
+    network: "Сеть",
+    auth: "Сессия",
+    budget: "Лимит времени",
+    model: "Ответ модели",
+    persist: "Хранилище",
+    aborted: "Отменено",
+    unknown: "Неизвестно",
+  },
+};
+
 export type ConversationPanelProps = {
   module: ConversationModule;
   variant: "compact" | "full";
@@ -185,6 +214,17 @@ export function ConversationPanel({
           </p>
         )}
 
+      {conv.engine?.provider === "ollama" &&
+        conv.engine.configured &&
+        !conv.engine.available &&
+        conv.engineError === null && (
+          <p className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-200">
+            {locale === "ru"
+              ? "Модель ИИ сейчас недоступна (Ollama не отвечает или модель не установлена). Проверь сервер — старые переписки остаются доступны."
+              : "KI-Modell gerade nicht erreichbar (Ollama antwortet nicht oder Modell fehlt). Prüfe den Server — gespeicherte Unterhaltungen bleiben verfügbar."}
+          </p>
+        )}
+
       <div
         ref={listRef}
         aria-live="polite"
@@ -207,7 +247,7 @@ export function ConversationPanel({
         {conv.busy && (
           <p className="flex items-center gap-2 text-sm text-slate-400">
             <Loader2 size={16} className="animate-spin" />
-            J.A.R.V.I.S. denkt nach …
+            {conv.streaming ? "J.A.R.V.I.S. schreibt …" : "J.A.R.V.I.S. denkt nach …"}
           </p>
         )}
       </div>
@@ -286,7 +326,15 @@ export function ConversationPanel({
             ? "Im Kalender ansehen →"
             : href === "/study"
               ? "In den Unterlagen ansehen →"
-              : "In den Finanzen ansehen →"}
+              : href === "/memory"
+                ? "In den Erinnerungen ansehen →"
+                : href === "/lecture"
+                  ? "Bei den Vorlesungen ansehen →"
+                  : href === "/lifestyle"
+                    ? "Bei Freizeit ansehen →"
+                    : href === "/#aufgaben"
+                      ? "Bei den Aufgaben ansehen →"
+                      : "In den Finanzen ansehen →"}
         </Link>
       )}
 
@@ -295,17 +343,30 @@ export function ConversationPanel({
       )}
 
       {conv.error !== null && (
-        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-rose-400/40 bg-rose-400/10 px-3 py-2 text-sm text-rose-200">
-          <AlertTriangle size={16} className="shrink-0" />
-          <span className="min-w-0 flex-1">{conv.error}</span>
-          {conv.canRetry && (
-            <button
-              type="button"
-              onClick={conv.retry}
-              className="shrink-0 rounded-lg border border-rose-400/40 px-2 py-1 text-xs transition-colors hover:bg-rose-400/20"
-            >
-              Erneut versuchen
-            </button>
+        <div className="rounded-xl border border-rose-400/40 bg-rose-400/10 px-3 py-2 text-sm text-rose-200">
+          <div className="flex flex-wrap items-center gap-2">
+            <AlertTriangle size={16} className="shrink-0" />
+            <span className="min-w-0 flex-1">{conv.error}</span>
+            {conv.canRetry && (
+              <button
+                type="button"
+                onClick={conv.retry}
+                className="shrink-0 rounded-lg border border-rose-400/40 px-2 py-1 text-xs transition-colors hover:bg-rose-400/20"
+              >
+                Erneut versuchen
+              </button>
+            )}
+          </div>
+          {conv.errorDetail !== null && (
+            <p className="mt-1 pl-6 text-xs text-rose-300/80">
+              {locale === "ru" ? "Причина" : "Ursache"}:{" "}
+              {CAUSE_LABEL[locale][conv.errorDetail.code] ??
+                conv.errorDetail.code}
+              {!conv.errorDetail.retryable &&
+                (locale === "ru"
+                  ? " · повторная отправка не поможет"
+                  : " · erneutes Senden hilft hier nicht")}
+            </p>
           )}
         </div>
       )}

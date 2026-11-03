@@ -61,10 +61,27 @@ const OLLAMA_SYSTEM = `Du bist die Verstehens-Komponente von J.A.R.V.I.S., einem
 {"type":"finance.create","transaction":{"title":"...","amountCents":2450,"type":"expense|income","category":"...","date":"YYYY-MM-DD","currency":"EUR","note":""}}
 {"type":"finance.list","limit":10}
 {"type":"finance.summary","monthKey":"YYYY-MM"|null,"from":"YYYY-MM-DD"|null,"to":"YYYY-MM-DD"|null,"category":"..."|null,"label":"..."}
+{"type":"memory.create","entry":{"category":"preferences|goals|study|finance|lifestyle|assistant","title":"...","content":"..."}}
+{"type":"tasks.create","task":{"title":"...","time":"HH:MM oder Keine Frist","priority":"Niedrig|Mittel|Hoch"}}
+{"type":"briefing.today"}
+{"type":"calendar.today"}
+{"type":"calendar.upcoming","days?":7}
+{"type":"tasks.open"}
+{"type":"study.deadlines"}
+{"type":"study.progress"}
+{"type":"study.attention","withinDays?":14}
+{"type":"lifestyle.preferences"}
+{"type":"lifestyle.saved"}
+{"type":"lifestyle.upcomingPlans"}
+{"type":"lifestyle.placesSearch","query?":"...","near?":"...","category?":"nature|food|culture|sport|cinema|date|free","limit?":5}
+{"type":"memory.approved"}
+{"type":"study.documents"}
+{"type":"study.retrieve","query":"...","documentId?":"...","limit?":5}
+{"type":"lecture.overview"}
 {"type":"clarify","question":"...","options":[{"label":"...","text":"..."}]}
 {"type":"unsupported","message":"..."}
 
-Regeln: Heute ist {today}, lokale Uhrzeit {now}, Sprache {lang}. Relative Daten ("morgen", "nächste Woche", "завтра") löst du gegen Heute auf. Deutsche Beträge ("24,50") werden zu Cent. Ende liegt nach Beginn. Bei fehlenden oder mehrdeutigen Angaben (Datum, Uhrzeit, Betrag, Termin) gib "clarify" mit einer kurzen deutschen Frage zurück — erfinde NIEMALS Werte. Kategorien für Ausgaben: Lebensmittel, Miete, Transport, Freizeit, Studium, Gesundheit, Abos, Umbuchung, Sonstiges. Für Einnahmen: Gehalt, Stipendium, Nebenjob, Erstattung, Sonstiges. Unverständliche Eingaben → "unsupported" mit kurzer deutscher Hilfe.`;
+Regeln: Heute ist {today}, lokale Uhrzeit {now}, Sprache {lang}. Relative Daten ("morgen", "nächste Woche", "завтра") löst du gegen Heute auf. Deutsche Beträge ("24,50") werden zu Cent. Ende liegt nach Beginn. "Merk dir ..." wird memory.create (passende Kategorie), Aufgaben werden tasks.create, Tagesbriefing/Tagesübersicht wird briefing.today, Orte-Suchen wird lifestyle.placesSearch (nur echte Suche, nie Adressen erfinden), Fragen zu Unterlagen werden study.retrieve. Bei fehlenden oder mehrdeutigen Angaben (Datum, Uhrzeit, Betrag, Termin) gib "clarify" mit einer kurzen deutschen Frage zurück — erfinde NIEMALS Werte. Kategorien für Ausgaben: Lebensmittel, Miete, Transport, Freizeit, Studium, Gesundheit, Abos, Umbuchung, Sonstiges. Für Einnahmen: Gehalt, Stipendium, Nebenjob, Erstattung, Sonstiges. Unverständliche Eingaben → "unsupported" mit kurzer deutscher Hilfe.`;
 
 async function parseWithOllama(
   text: string,

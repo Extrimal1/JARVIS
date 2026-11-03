@@ -148,16 +148,16 @@ describe("transcriptToTurns", () => {
 describe("turnHref", () => {
   it("links turns to their data module", () => {
     assert.equal(
-      turnHref([{ tool: "calendar.today", label: "x", ok: true }]),
+      turnHref([{ tool: "calendar.today", label: "x", ok: true, detail: null }]),
       "/calendar",
     );
     assert.equal(
-      turnHref([{ tool: "finance.largest", label: "x", ok: true }]),
+      turnHref([{ tool: "finance.largest", label: "x", ok: true, detail: null }]),
       "/finance",
     );
     assert.equal(turnHref([]), undefined);
     assert.equal(
-      turnHref([{ tool: "memory.approved", label: "x", ok: true }]),
+      turnHref([{ tool: "memory.approved", label: "x", ok: true, detail: null }]),
       undefined,
     );
   });

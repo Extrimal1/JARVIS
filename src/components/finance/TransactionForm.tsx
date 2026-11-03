@@ -8,8 +8,10 @@ import { createId } from "@/src/lib/ids";
 import {
   EXPENSE_CATEGORIES,
   INCOME_CATEGORIES,
+  RECURRING_LABELS,
   centsToEuroInput,
   parseEuroToCents,
+  type RecurringCadence,
   type Transaction,
   type TransactionType,
 } from "@/src/lib/finance";
@@ -24,6 +26,8 @@ type Fields = {
   type: TransactionType;
   category: string;
   note: string;
+  /** "none" = one-off. Informative marker only (see finance.ts). */
+  recurring: RecurringCadence;
 };
 
 function toFields(
@@ -39,6 +43,7 @@ function toFields(
       type: initial.type,
       category: initial.category,
       note: initial.note ?? "",
+      recurring: initial.recurring ?? "none",
     };
   }
 
@@ -50,6 +55,7 @@ function toFields(
     category:
       defaultType === "income" ? INCOME_CATEGORIES[0] : EXPENSE_CATEGORIES[0],
     note: "",
+    recurring: "none",
   };
 }
 
@@ -159,6 +165,9 @@ export function TransactionForm({
       fields.title.trim() !== initial.title
         ? { originalDescription: initial.title }
         : {}),
+      ...(fields.recurring === "none"
+        ? {}
+        : { recurring: fields.recurring }),
     });
   }
 
@@ -295,6 +304,28 @@ export function TransactionForm({
                 </option>
               ))}
             </select>
+          </label>
+
+          <label className="block text-xs text-slate-400">
+            Wiederkehrend
+            <select
+              value={fields.recurring}
+              onChange={(change) =>
+                setField("recurring", change.target.value as RecurringCadence)
+              }
+              className="mt-2 w-full rounded-xl border border-white/10 bg-[#111827] px-3 py-3 text-sm text-white outline-none focus:border-cyan-300/50"
+            >
+              {(
+                ["none", "monthly", "quarterly", "yearly"] as const
+              ).map((cadence) => (
+                <option key={cadence} value={cadence}>
+                  {RECURRING_LABELS[cadence]}
+                </option>
+              ))}
+            </select>
+            <span className="mt-1 block text-[11px] leading-4 text-slate-500">
+              Nur Kennzeichnung — es werden keine automatischen Folgebuchungen erzeugt.
+            </span>
           </label>
 
           <label className="block text-xs text-slate-400">

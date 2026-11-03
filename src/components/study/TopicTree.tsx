@@ -14,21 +14,27 @@ import {
 import {
   listDocuments,
   type DocumentMeta,
-} from "@/src/lib/documents";
+} from "@/src/lib/db/documents";
 import { createId } from "@/src/lib/ids";
 import type { Entry, StudyData, TopicMastery } from "@/src/lib/study";
 import type { QuizQuestion } from "@/src/lib/quiz";
 import type { ListResource } from "@/src/lib/db/useRemoteResource";
 import type { StudyResource } from "@/src/lib/db/useModules";
 import {
-  mergeExtractedTopics,
   mergeTopicsManual,
   removeTopic,
   renameTopic,
   splitTopic,
-  type ExtractedTopic,
 } from "@/src/lib/study/topics";
 import { extractDocumentTopics } from "@/src/lib/db/studyActions";
+import {
+  classifyTopicError,
+  formatTopicSummary,
+  runDocumentTopicExtraction,
+  topicCauseLabel,
+  type ClassifiedTopicError,
+  type DocumentTopicSummary,
+} from "@/src/lib/study/autoTopics";
 
 const MASTERY_LABELS: Record<TopicMastery, string> = {
   "not-started": "Neu",
@@ -48,14 +54,21 @@ const MASTERY_STYLES: Record<TopicMastery, string> = {
 
 const PRIORITY_LABELS = { high: "Wichtig", normal: "Normal", low: "Später" } as const;
 
-/** Max extraction calls per click (bounded, resumable via Weiter). */
-const EXTRACT_CALLS_PER_CLICK = 2;
+type DocExtractNote = {
+  docId: string;
+  name: string;
+  covered: string[];
+  done: boolean;
+  insufficient: boolean;
+};
 
 type ExtractState = {
-  docIndex: number;
-  coveredLabels: string[];
-  created: number;
-  merged: number;
+  combined: DocumentTopicSummary;
+  perDoc: DocExtractNote[];
+  /** Names of subject docs skipped (not fully processed). */
+  skippedDocs: string[];
+  /** Names of docs without enough text for topics. */
+  insufficientDocs: string[];
   done: boolean;
 };
 
@@ -87,9 +100,12 @@ export function TopicTree({
   const [deleting, setDeleting] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [docsError, setDocsError] = useState<string | null>(null);
   const [extracting, setExtracting] = useState(false);
   const [extract, setExtract] = useState<ExtractState | null>(null);
-  const [extractError, setExtractError] = useState<string | null>(null);
+  const [extractProgress, setExtractProgress] = useState<string | null>(null);
+  const [extractError, setExtractError] =
+    useState<ClassifiedTopicError | null>(null);
   const [locale, setLocale] = useState<"de" | "ru">("de");
 
   useEffect(() => {
@@ -108,10 +124,20 @@ export function TopicTree({
 
     listDocuments()
       .then((items) => {
-        if (!cancelled) setDocs(items);
+        if (cancelled) return;
+
+        setDocs(items);
+        setDocsError(null);
       })
-      .catch(() => {
-        if (!cancelled) setDocs([]);
+      .catch((loadError: unknown) => {
+        if (cancelled) return;
+
+        setDocs([]);
+        setDocsError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Dokumente konnten nicht geladen werden.",
+        );
       });
 
     return () => {
@@ -123,6 +149,11 @@ export function TopicTree({
   const subjectDocs = useMemo(
     () => docs.filter((doc) => doc.subject === activeSubject),
     [docs, activeSubject],
+  );
+  const completedDocs = useMemo(
+    () =>
+      subjectDocs.filter((doc) => doc.extractionStatus === "completed"),
+    [subjectDocs],
   );
   const subjectTopics = useMemo(
     () => data.topics.filter((topic) => topic.subject === activeSubject),
@@ -379,110 +410,128 @@ export function TopicTree({
     }
   }
 
-  async function persistMerge(
-    incoming: { topic: ExtractedTopic; documentId: string }[],
-  ): Promise<{ created: number; merged: number }> {
-    const result = mergeExtractedTopics(
-      data.topics,
-      incoming,
-      activeSubject,
-      createId,
-    );
-    let created = 0;
-    let merged = 0;
-
-    for (const entry of result.entries) {
-      const before = data.topics.find((item) => item.id === entry.id);
-
-      if (before === undefined) {
-        await studyStore.addEntry("topics", entry);
-        created += 1;
-      } else if (JSON.stringify(before) !== JSON.stringify(entry)) {
-        await studyStore.updateEntry(entry.id, {
-          title: entry.title,
-          detail: entry.detail,
-          parentId: entry.parentId ?? null,
-          sourceRefs: entry.sourceRefs ?? [],
-          topicData: entry.topicData,
-        });
-        merged += 1;
-      }
-    }
-
-    return { created, merged };
-  }
-
-  async function runExtraction(resume: ExtractState | null) {
+  async function runExtraction(options?: { resetCovered?: boolean }) {
     if (extracting || activeSubject === "") return;
+
+    const resetCovered = options?.resetCovered === true;
+
+    const ready = completedDocs;
+    const skipped = subjectDocs.filter(
+      (doc) => doc.extractionStatus !== "completed",
+    );
+
+    if (ready.length === 0) {
+      setExtract({
+        combined: {
+          documentId: "",
+          created: 0,
+          merged: 0,
+          droppedInvalid: 0,
+          droppedUngrounded: 0,
+          spansDone: [],
+          skippedSpans: [],
+          exhaustedLabels: [],
+          insufficient: false,
+          done: true,
+        },
+        perDoc: [],
+        skippedDocs: skipped.map((doc) => doc.name),
+        insufficientDocs: [],
+        done: true,
+      });
+
+      return;
+    }
 
     setExtracting(true);
     setExtractError(null);
 
     try {
-      let state: ExtractState = resume ?? {
-        docIndex: 0,
-        coveredLabels: [],
-        created: 0,
-        merged: 0,
-        done: false,
+      // Working list threads through every doc: merges never see
+      // stale render-time state, retries stay duplicate-safe.
+      // Counts seed from the previous run so resumed docs keep
+      // their history (subject change resets via setExtract(null)).
+      let working = data.topics.map((entry) => ({ ...entry }));
+      const seed = extract?.combined;
+      const combined: DocumentTopicSummary = {
+        documentId: "",
+        created: seed?.created ?? 0,
+        merged: seed?.merged ?? 0,
+        droppedInvalid: seed?.droppedInvalid ?? 0,
+        droppedUngrounded: seed?.droppedUngrounded ?? 0,
+        spansDone: [],
+        skippedSpans: [],
+        exhaustedLabels: [],
+        insufficient: false,
+        done: true,
       };
+      const perDoc: DocExtractNote[] = [];
+      const insufficientDocs: string[] = [];
 
-      for (
-        let call = 0;
-        call < EXTRACT_CALLS_PER_CLICK && state.docIndex < subjectDocs.length;
-        call += 1
-      ) {
-        const doc = subjectDocs[state.docIndex] as DocumentMeta;
-        const response = await extractDocumentTopics(
-          doc.id,
+      for (const doc of ready) {
+        const previous = resetCovered
+          ? undefined
+          : extract?.perDoc.find((note) => note.docId === doc.id);
+
+        if (previous?.done === true) {
+          perDoc.push(previous);
+          continue;
+        }
+
+        setExtractProgress(`„${doc.name}“ wird ausgewertet …`);
+
+        const summary = await runDocumentTopicExtraction({
+          documentId: doc.id,
+          subject: activeSubject,
           locale,
-          state.coveredLabels,
-          6,
-          fetch,
-        );
+          topics: working,
+          makeId: createId,
+          initialCovered: previous?.covered,
+          call: (coveredLabels, maxSpans) =>
+            extractDocumentTopics(doc.id, locale, coveredLabels, maxSpans, fetch),
+          store: studyStore,
+          onProgress: (progress) => {
+            setExtractProgress(
+              `„${doc.name}“: ${progress.spansDone.length} Abschnitte · +${progress.created} neu, ${progress.merged} ergänzt`,
+            );
+          },
+        });
 
-        if (response.topics.length > 0) {
-          const counts = await persistMerge(
-            response.topics.map((topic) => ({
-              topic,
-              documentId: doc.id,
-            })),
-          );
+        working = summary.topics;
+        combined.created += summary.created;
+        combined.merged += summary.merged;
+        combined.droppedInvalid += summary.droppedInvalid;
+        combined.droppedUngrounded += summary.droppedUngrounded;
+        combined.skippedSpans.push(...summary.skippedSpans);
+        combined.exhaustedLabels.push(...summary.exhaustedLabels);
 
-          state = {
-            ...state,
-            created: state.created + counts.created,
-            merged: state.merged + counts.merged,
-          };
-        }
+        const noteDone =
+          summary.done || summary.skippedSpans.length === 0;
 
-        const covered = [
-          ...state.coveredLabels,
-          ...response.spansDone,
-        ];
+        if (summary.insufficient) insufficientDocs.push(doc.name);
+        if (!noteDone) combined.done = false;
 
-        if (response.done) {
-          state = {
-            docIndex: state.docIndex + 1,
-            coveredLabels: [],
-            created: state.created,
-            merged: state.merged,
-            done: state.docIndex + 1 >= subjectDocs.length,
-          };
-        } else {
-          state = { ...state, coveredLabels: covered };
-        }
+        perDoc.push({
+          docId: doc.id,
+          name: doc.name,
+          covered: summary.spansDone,
+          done: noteDone,
+          insufficient: summary.insufficient,
+        });
       }
 
-      setExtract(state);
+      setExtract({
+        combined,
+        perDoc,
+        skippedDocs: skipped.map((doc) => doc.name),
+        insufficientDocs,
+        done: combined.done,
+      });
     } catch (extractFailed) {
-      setExtractError(
-        extractFailed instanceof Error
-          ? extractFailed.message
-          : "Extraktion fehlgeschlagen.",
-      );
+      setExtractError(classifyTopicError(extractFailed));
     } finally {
       setExtracting(false);
+      setExtractProgress(null);
     }
   }
 
@@ -768,12 +817,14 @@ export function TopicTree({
           </label>
 
           <button
-            onClick={() => void runExtraction(null)}
-            disabled={extracting || subjectDocs.length === 0}
+            onClick={() => void runExtraction()}
+            disabled={extracting || completedDocs.length === 0}
             title={
               subjectDocs.length === 0
                 ? "Keine Dokumente mit diesem Fach verknüpft"
-                : "Themen aus den Dokumenten dieses Fachs extrahieren"
+                : completedDocs.length === 0
+                  ? "Noch kein Dokument dieses Fachs ist verarbeitet"
+                  : "Themen aus den Dokumenten dieses Fachs extrahieren"
             }
             className="flex shrink-0 items-center gap-1 rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-300 transition hover:border-cyan-300/30 disabled:opacity-50"
           >
@@ -801,24 +852,80 @@ export function TopicTree({
         <p className="mt-2 text-[11px] text-slate-500">
           {subjectDocs.length} {subjectDocs.length === 1 ? "Dokument" : "Dokumente"} ·{" "}
           {subjectTopics.length} {subjectTopics.length === 1 ? "Thema" : "Themen"}
-          {extract !== null &&
-            ` · +${extract.created} neu, ${extract.merged} ergänzt`}
+          {extract !== null && ` · ${formatTopicSummary(extract.combined)}`}
         </p>
 
-        {extractError !== null && (
-          <p role="alert" className="mt-2 text-xs text-rose-300">
-            {extractError}
+        {extracting && extractProgress !== null && (
+          <p role="status" className="mt-2 text-xs text-cyan-200">
+            {extractProgress}
           </p>
+        )}
+
+        {docsError !== null && (
+          <p role="alert" className="mt-2 text-xs text-rose-300">
+            Dokumente konnten nicht geladen werden: {docsError}
+          </p>
+        )}
+
+        {extract !== null && extract.skippedDocs.length > 0 && (
+          <p
+            className="mt-2 text-[11px] text-slate-500"
+            title={extract.skippedDocs.join(", ")}
+          >
+            {extract.skippedDocs.length}{" "}
+            {extract.skippedDocs.length === 1 ? "Dokument" : "Dokumente"} noch
+            nicht verarbeitet — nur abgeschlossene werden extrahiert.
+          </p>
+        )}
+
+        {extract !== null && extract.insufficientDocs.length > 0 && (
+          <p
+            className="mt-2 text-[11px] text-slate-500"
+            title={extract.insufficientDocs.join(", ")}
+          >
+            Ohne ausreichenden Text für Themen:{" "}
+            {extract.insufficientDocs.join(", ")}.
+          </p>
+        )}
+
+        {extractError !== null && (
+          <div role="alert" className="mt-2 flex flex-wrap items-center gap-2">
+            <p className="min-w-0 flex-1 text-xs text-rose-300">
+              Ursache: {topicCauseLabel(extractError.cause)} —{" "}
+              {extractError.detail}
+            </p>
+            {extractError.retryable && !extracting && (
+              <button
+                onClick={() => void runExtraction()}
+                className="shrink-0 rounded-xl border border-rose-300/30 px-3 py-1.5 text-xs text-rose-200 hover:bg-rose-400/10"
+              >
+                Erneut versuchen
+              </button>
+            )}
+          </div>
         )}
 
         {extract !== null && !extract.done && !extracting && (
           <button
-            onClick={() => void runExtraction(extract)}
+            onClick={() => void runExtraction()}
             className="mt-2 rounded-xl border border-cyan-300/30 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-300/10"
           >
             Weiter — restliche Abschnitte extrahieren
           </button>
         )}
+
+        {extract !== null &&
+          extract.done &&
+          extract.combined.exhaustedLabels.length > 0 &&
+          !extracting && (
+            <button
+              onClick={() => void runExtraction({ resetCovered: true })}
+              title="Fehlerhafte Abschnitte werden neu angefragt; bereits gespeicherte Themen bleiben bestehen."
+              className="mt-2 rounded-xl border border-amber-300/30 px-3 py-2 text-xs text-amber-200 hover:bg-amber-300/10"
+            >
+              Fehlerhafte Abschnitte erneut versuchen
+            </button>
+          )}
 
         {merging && (
           <div className="mt-2 flex flex-wrap items-center gap-2 rounded-xl border border-cyan-300/20 bg-cyan-300/[0.04] p-2">

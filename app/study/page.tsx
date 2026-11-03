@@ -27,7 +27,13 @@ import { SubjectManager } from "@/src/components/study/SubjectManager";
 import { TopicTree } from "@/src/components/study/TopicTree";
 import { daysBetween, formatDaysLeft } from "@/src/lib/briefing";
 import { markReviewed } from "@/src/lib/revision";
-import { useQuiz, useStudy } from "@/src/lib/db/useModules";
+import {
+  PREP_TABS,
+  STUDY_TABS,
+  parseStudyTabs,
+  type StudyTab,
+} from "@/src/lib/study/tabs";
+import { useQuiz, useStudy, type StudyResource } from "@/src/lib/db/useModules";
 import {
   listReviewEvents,
   logReviewEvent,
@@ -91,6 +97,8 @@ function StudySection({
   onDelete,
   onToggle,
   quizStore,
+  studyStore,
+  topics,
 }: {
   sectionKey: SectionKey;
   title: string;
@@ -103,6 +111,9 @@ function StudySection({
   onToggle: (id: string) => void;
   /** Shared quiz store, used only by the materials section. */
   quizStore?: ListResource<QuizQuestion>;
+  /** Shared study store + topics for automatic topic extraction. */
+  studyStore?: StudyResource;
+  topics?: Entry[];
 }) {
   const [expanded, setExpanded] = useState(false);
   const [name, setName] = useState("");
@@ -348,28 +359,14 @@ function StudySection({
               await onAdd("materials", entry);
             }}
             quizStore={quizStore}
+            studyStore={studyStore}
+            topics={topics}
           />
         </div>
       )}
     </section>
   );
 }
-
-type StudyTab = "overview" | "documents" | "prep";
-
-const STUDY_TABS: { key: StudyTab; label: string }[] = [
-  { key: "overview", label: "Übersicht" },
-  { key: "documents", label: "Dokumente" },
-  { key: "prep", label: "Prüfungsvorbereitung" },
-];
-
-const PREP_TABS: { key: PrepView; label: string }[] = [
-  { key: "overview", label: "Übersicht" },
-  { key: "exams", label: "Meine Prüfungen" },
-  { key: "topics", label: "Themen" },
-  { key: "plan", label: "Lernplan" },
-  { key: "progress", label: "Fortschritt" },
-];
 
 export default function StudyPage() {
   const studyStore = useStudy(initialData);
@@ -380,14 +377,24 @@ export default function StudyPage() {
   const [planFocus, setPlanFocus] = useState<string | null>(null);
 
   useEffect(() => {
-    // Deep links from subject/topic rows open the documents tab.
-    if (
-      typeof window !== "undefined" &&
-      window.location.hash.startsWith("#dokumente-")
-    ) {
+    // Deep links: sidebar + dashboard link here with ?tab=&prep=, and
+    // subject/topic rows use #dokumente-… hashes. Mount-gated so the
+    // prerendered HTML never depends on the URL.
+    if (typeof window === "undefined") return;
+
+    if (window.location.hash.startsWith("#dokumente-")) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setTab("documents");
+
+      return;
     }
+
+    const parsed = parseStudyTabs(
+      new URLSearchParams(window.location.search),
+    );
+
+    setTab(parsed.tab);
+    setPrepTab(parsed.prep);
   }, []);
 
   function openPrep(view: PrepView, examId?: string) {
@@ -707,6 +714,8 @@ export default function StudyPage() {
                     onDelete={deleteEntry}
                     onToggle={toggleTopic}
                     quizStore={quizStore}
+                    studyStore={studyStore}
+                    topics={data.topics}
                   />
                 ))}
               <RevisionPanel

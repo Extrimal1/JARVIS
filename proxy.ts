@@ -9,8 +9,13 @@ import { NextResponse, type NextRequest } from "next/server";
 
 const PUBLIC_PATHS = ["/login", "/manifest.webmanifest", "/favicon.ico"];
 
-// Public data endpoints (no login, no user data): health + weather.
-const PUBLIC_API_PREFIXES = ["/api/auth/", "/api/health", "/api/weather/"];
+// Public data endpoints (no login, no user data): health + weather + news.
+const PUBLIC_API_PREFIXES = [
+  "/api/auth/",
+  "/api/health",
+  "/api/weather/",
+  "/api/lifestyle/news",
+];
 
 export function proxy(request: NextRequest) {
   if (process.env.NEXT_PUBLIC_CLOUD_ENABLED !== "1") {
@@ -41,5 +46,5 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|icons|sw.js).*)"],
+  matcher: ["/((?!_next/static|_next/image|icons|fonts|sw.js).*)"],
 };

@@ -5,6 +5,13 @@ import { Mic, Pause, Play, Square } from "lucide-react";
 import { createId } from "@/src/lib/ids";
 import { appendChunk, clearChunks, saveAudio } from "@/src/lib/lecture/audioStore";
 import {
+  buildFinalAudio,
+  classifyChunk,
+  pickRecordingMimeType,
+  rescueFileName,
+  resolveFinalMimeType,
+} from "@/src/lib/lecture/audioMime";
+import {
   LECTURE_LANGUAGES,
   formatDuration,
   type LectureLanguage,
@@ -14,35 +21,6 @@ import {
 import type { Entry } from "@/src/lib/study";
 
 const CHUNK_TIMESLICE_MS = 5000;
-
-const MIME_CANDIDATES = [
-  "audio/webm;codecs=opus",
-  "audio/webm",
-  "audio/mp4",
-  "",
-];
-
-function pickMimeType(): string {
-  if (
-    typeof window === "undefined" ||
-    typeof MediaRecorder === "undefined" ||
-    typeof MediaRecorder.isTypeSupported !== "function"
-  ) {
-    return "";
-  }
-
-  for (const candidate of MIME_CANDIDATES) {
-    if (candidate === "") return "";
-
-    try {
-      if (MediaRecorder.isTypeSupported(candidate)) return candidate;
-    } catch {
-      // Try the next candidate.
-    }
-  }
-
-  return "";
-}
 
 function recorderSupported(): boolean {
   return (
@@ -91,6 +69,7 @@ export function RecorderPanel({
   const [consent, setConsent] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [persistedChunks, setPersistedChunks] = useState(0);
+  const [droppedChunks, setDroppedChunks] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [rescue, setRescue] = useState<{ blob: Blob; name: string } | null>(null);
 
@@ -103,6 +82,7 @@ export function RecorderPanel({
   const pauseStartRef = useRef(0);
   const metaRef = useRef<LocalRecording | null>(null);
   const tickerRef = useRef<number | null>(null);
+  const finalizingRef = useRef(false);
 
   const supported = recorderSupported();
   const busy = phase === "requesting" || phase === "finalizing";
@@ -131,6 +111,7 @@ export function RecorderPanel({
     pausedTotalRef.current = 0;
     pauseStartRef.current = 0;
     metaRef.current = null;
+    finalizingRef.current = false;
   }
 
   useEffect(
@@ -181,34 +162,61 @@ export function RecorderPanel({
         unknown.name === "NotFoundError"
       ) {
         setError("Kein Mikrofon gefunden. Schließe ein Mikrofon an.");
+      } else if (
+        unknown instanceof DOMException &&
+        (unknown.name === "NotReadableError" || unknown.name === "AbortError")
+      ) {
+        setError(
+          "Das Mikrofon wird bereits von einer anderen App verwendet oder ist blockiert.",
+        );
+      } else if (unknown instanceof DOMException && unknown.name === "SecurityError") {
+        setError(
+          "Mikrofonzugriff aus Sicherheitsgründen blockiert (sichere Verbindung erforderlich).",
+        );
       } else {
-        setError("Das Mikrofon konnte nicht geöffnet werden.");
+        const detail =
+          unknown instanceof DOMException ? ` (${unknown.name})` : "";
+
+        setError(`Das Mikrofon konnte nicht geöffnet werden${detail}.`);
       }
 
       return;
     }
 
-    const mimeType = pickMimeType();
+    const picked = pickRecordingMimeType();
     let recorder: MediaRecorder;
 
     try {
       recorder =
-        mimeType === "" ? new MediaRecorder(stream) : new MediaRecorder(stream, { mimeType });
+        picked === ""
+          ? new MediaRecorder(stream)
+          : new MediaRecorder(stream, { mimeType: picked });
     } catch {
-      for (const track of stream.getTracks()) track.stop();
-      setPhase("idle");
-      setError("Aufnahme wird von diesem Browser nicht unterstützt.");
-      return;
+      // The picked type was rejected at construction time; retry once
+      // with the browser default before giving up.
+      try {
+        recorder = new MediaRecorder(stream);
+      } catch {
+        for (const track of stream.getTracks()) track.stop();
+        setPhase("idle");
+        setError("Aufnahme wird von diesem Browser nicht unterstützt.");
+        return;
+      }
     }
 
     const now = new Date().toISOString();
+    // Honest container label: the browser's report, the picked type, or
+    // "" (unknown default) — never a hardcoded container that could lie
+    // about the bytes (e.g. Safari records mp4, not webm).
+    const initialMime =
+      recorder.mimeType !== "" ? recorder.mimeType : picked;
     const meta: LocalRecording = {
       id: createId(),
       sessionId: sessionId === "" ? null : sessionId,
       courseId: courseId === "" ? null : courseId,
       title: title.trim() === "" ? "Vorlesung ohne Titel" : title.trim(),
       language,
-      mimeType: recorder.mimeType !== "" ? recorder.mimeType : "audio/webm",
+      mimeType: initialMime,
       durationSeconds: 0,
       sizeBytes: 0,
       sha256: "",
@@ -236,10 +244,18 @@ export function RecorderPanel({
     pausedTotalRef.current = 0;
     pauseStartRef.current = 0;
     setPersistedChunks(0);
+    setDroppedChunks(0);
     setElapsed(0);
 
     recorder.ondataavailable = (event: BlobEvent) => {
-      if (event.data.size === 0) return;
+      const verdict = classifyChunk(event.data);
+
+      if (!verdict.keep) {
+        // Empty heartbeats carry no audio; count them visibly so the
+        // recording line can report them instead of dropping silently.
+        setDroppedChunks((count) => count + 1);
+        return;
+      }
 
       memoryChunksRef.current.push(event.data);
       const index = chunkIndexRef.current;
@@ -314,6 +330,10 @@ export function RecorderPanel({
   }
 
   async function finalize() {
+    // onstop and the stop() fallback can both fire; finalize exactly once.
+    if (finalizingRef.current) return;
+
+    finalizingRef.current = true;
     const meta = metaRef.current;
 
     stopTicker();
@@ -326,15 +346,44 @@ export function RecorderPanel({
       return;
     }
 
-    const blob = new Blob(memoryChunksRef.current, { type: meta.mimeType });
+    // The honest container: live recorder report wins over the
+    // start-of-recording label, chunk declarations corroborate.
+    const effectiveMime = resolveFinalMimeType({
+      metaMime: meta.mimeType,
+      recorderMime: recorderRef.current?.mimeType ?? "",
+      chunkTypes: memoryChunksRef.current.map((chunk) => chunk.type),
+    });
+    const blob = buildFinalAudio(memoryChunksRef.current, effectiveMime);
     const duration = currentElapsed();
+
+    if (blob.size === 0) {
+      await clearChunks(meta.id).catch(() => undefined);
+      await onSaveRecording({
+        ...meta,
+        mimeType: effectiveMime,
+        durationSeconds: Math.round(duration),
+        sizeBytes: 0,
+        status: "failed",
+        errorCode: "no-audio",
+        updatedAt: new Date().toISOString(),
+      });
+      resetRefs();
+      setElapsed(0);
+      setPersistedChunks(0);
+      setPhase("idle");
+      setError(
+        "Die Aufnahme enthielt keine Audiodaten (Mikrofon lieferte nichts). Es wurde kein leeres Audio gespeichert.",
+      );
+      return;
+    }
 
     try {
       await saveAudio(meta.id, blob);
     } catch {
-      setRescue({ blob, name: `${meta.title}.webm` });
+      setRescue({ blob, name: rescueFileName(meta.title, effectiveMime) });
       await onSaveRecording({
         ...meta,
+        mimeType: effectiveMime,
         durationSeconds: Math.round(duration),
         sizeBytes: blob.size,
         status: "failed",
@@ -354,6 +403,7 @@ export function RecorderPanel({
 
     await onSaveRecording({
       ...meta,
+      mimeType: effectiveMime,
       durationSeconds: Math.round(duration),
       sizeBytes: blob.size,
       sha256: hash,
@@ -364,6 +414,7 @@ export function RecorderPanel({
     resetRefs();
     setElapsed(0);
     setPersistedChunks(0);
+    setDroppedChunks(0);
     setPhase("idle");
   }
 
@@ -375,6 +426,15 @@ export function RecorderPanel({
     if (pauseStartRef.current > 0) {
       pausedTotalRef.current += Date.now() - pauseStartRef.current;
       pauseStartRef.current = 0;
+    }
+
+    // Flush the trailing partial chunk so finalize keeps every byte.
+    if (recorder.state !== "inactive") {
+      try {
+        recorder.requestData();
+      } catch {
+        // requestData is best-effort; stop() still flushes on most browsers.
+      }
     }
 
     try {
@@ -630,6 +690,8 @@ export function RecorderPanel({
               {formatDuration(elapsed)} aufgenommen · {persistedChunks}{" "}
               {persistedChunks === 1 ? "Abschnitt" : "Abschnitte"} lokal
               zwischengespeichert
+              {droppedChunks > 0 &&
+                ` · ${droppedChunks} leere ${droppedChunks === 1 ? "Lieferung" : "Lieferungen"} ohne Audiodaten übersprungen`}
             </p>
           )}
 
