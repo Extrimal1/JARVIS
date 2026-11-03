@@ -10,7 +10,11 @@ import {
   type FinanceData,
 } from "@/src/lib/finance";
 import { EMPTY_STUDY, isStudyData } from "@/src/lib/study";
-import { isTaskList, type Task } from "@/src/lib/tasks";
+import {
+  isTaskList,
+  isTaskOverdue,
+  type Task,
+} from "@/src/lib/tasks";
 import {
   collectDeadlines,
   openTasks,
@@ -160,14 +164,19 @@ export function getUpcomingEvents(input: {
 
 export type OpenTasks = {
   open: Task[];
-  /** Open tasks whose HH:MM time already passed (dashboard tasks are today's list). */
+  /**
+   * Open tasks that are overdue: past their due date (when `todayISO`
+   * is given), or — for tasks without a due date — whose HH:MM time
+   * already passed (dashboard tasks without a date are today's list).
+   */
   overdue: Task[];
 };
 
-/** Incomplete tasks, highest priority first, plus time-passed ones. */
+/** Incomplete tasks, highest priority first, plus overdue ones. */
 export function getOpenTasks(input: {
   tasks: unknown;
   nowTime: string | null;
+  todayISO?: string;
 }): ToolResult<OpenTasks> {
   if (!isTaskList(input.tasks)) {
     return { ok: false, error: invalidInput("getOpenTasks") };
@@ -176,12 +185,16 @@ export function getOpenTasks(input: {
   const open = openTasks(input.tasks);
   const nowMinutes =
     input.nowTime === null ? null : timeToMinutes(input.nowTime);
-
-  if (nowMinutes === null) {
-    return { ok: true, data: { open, overdue: [] } };
-  }
+  const todayISO =
+    input.todayISO !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(input.todayISO)
+      ? input.todayISO
+      : null;
 
   const overdue = open.filter((task) => {
+    if (todayISO !== null && isTaskOverdue(task, todayISO)) return true;
+    if (nowMinutes === null) return false;
+    if (task.dueDate !== undefined) return false;
+
     const taskMinutes = timeToMinutes(task.time);
 
     return taskMinutes !== null && taskMinutes < nowMinutes;

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CLOUD_ENABLED } from "@/src/lib/db/mode";
 import {
   Activity,
@@ -16,6 +16,7 @@ import {
   Menu,
   Mic,
   Sparkles,
+  Sunrise,
   Wallet,
   X,
 } from "lucide-react";
@@ -31,17 +32,17 @@ type NavEntry = {
 };
 
 const STUDY_CHILDREN: NavChild[] = [
-  { href: "/study", label: "Übersicht" },
+  { href: "/study", label: "Ãœbersicht" },
   { href: "/study?tab=documents", label: "Dokumente" },
-  { href: "/study?tab=prep", label: "Prüfungsvorbereitung" },
-  { href: "/study?tab=prep&prep=exams", label: "Meine Prüfungen" },
+  { href: "/study?tab=prep", label: "PrÃ¼fungsvorbereitung" },
+  { href: "/study?tab=prep&prep=exams", label: "Meine PrÃ¼fungen" },
   { href: "/study?tab=prep&prep=topics", label: "Themen" },
   { href: "/study?tab=prep&prep=plan", label: "Lernplan" },
   { href: "/study?tab=prep&prep=progress", label: "Fortschritt" },
 ];
 
 const links: NavEntry[] = [
-  { href: "/", label: "Übersicht", icon: Activity },
+  { href: "/", label: "Ãœbersicht", icon: Activity },
   { href: "/assistant", label: "Assistent", icon: Sparkles },
   {
     href: "/study",
@@ -49,10 +50,11 @@ const links: NavEntry[] = [
     icon: BookOpen,
     children: STUDY_CHILDREN,
   },
+  { href: "/briefing", label: "Briefing", icon: Sunrise },
   { href: "/calendar", label: "Terminplaner", icon: CalendarDays },
   { href: "/finance", label: "Finanzen", icon: Wallet },
   { href: "/lifestyle", label: "Freizeit", icon: Compass },
-  { href: "/memory", label: "Gedächtnis", icon: Brain },
+  { href: "/memory", label: "GedÃ¤chtnis", icon: Brain },
   { href: "/lecture", label: "Vorlesungen", icon: Mic },
 ];
 
@@ -127,7 +129,7 @@ function NavLinks({
               <button
                 onClick={() => setStudyOpen((open) => !open)}
                 aria-expanded={studyOpen}
-                aria-label="Studium-Untermenü umschalten"
+                aria-label="Studium-UntermenÃ¼ umschalten"
                 className="rounded-lg p-1 text-slate-400 transition hover:bg-white/10 hover:text-white"
               >
                 <ChevronDown
@@ -138,7 +140,7 @@ function NavLinks({
             </div>
 
             {studyOpen && (
-              <ul aria-label={`${label} Untermenü`} className="ml-5 mt-1 space-y-0.5 border-l border-white/10 pl-3">
+              <ul aria-label={`${label} UntermenÃ¼`} className="ml-5 mt-1 space-y-0.5 border-l border-white/10 pl-3">
                 {children.map((child) => (
                   <li key={child.href}>
                     <Link
@@ -196,7 +198,7 @@ function SignOutButton() {
         className="jarvis-press flex w-full items-center gap-3 rounded-xl border border-white/10 px-3 py-3 text-sm text-slate-400 transition hover:border-white/25 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
       >
         <LogOut size={18} />
-        {busy ? "Wird abgemeldet …" : "Abmelden"}
+        {busy ? "Wird abgemeldet â€¦" : "Abmelden"}
       </button>
 
       {failed && (
@@ -218,7 +220,7 @@ function StatusCard() {
 
       <p className="mt-2 text-xs leading-5 text-slate-500">
         {CLOUD_ENABLED
-          ? "Cloud-Synchronisierung aktiv."
+          ? "Cloud-Synchronisierung aktiv. Vorlesungs-Audio bleibt lokal auf diesem GerÃ¤t."
           : "Lokal-first: deine Daten bleiben in diesem Browser."}
       </p>
     </div>
@@ -228,13 +230,15 @@ function StatusCard() {
 export default function Sidebar() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
-  const [lastPathname, setLastPathname] = useState(pathname);
+  const pathnameRef = useRef(pathname);
 
-  // Close the mobile drawer after navigation (render adjustment, no effect).
-  if (lastPathname !== pathname) {
-    setLastPathname(pathname);
-    setOpen(false);
-  }
+  // Close the mobile drawer after navigation (effect, no render setState).
+  useEffect(() => {
+    if (pathnameRef.current !== pathname) {
+      pathnameRef.current = pathname;
+      setOpen(false);
+    }
+  }, [pathname]);
 
   useLockBodyScroll(open);
 
@@ -267,7 +271,7 @@ export default function Sidebar() {
         <button
           onClick={() => setOpen(true)}
           aria-expanded={open}
-          aria-label="Menü öffnen"
+          aria-label="MenÃ¼ Ã¶ffnen"
           className="rounded-xl border border-white/10 p-2.5 text-slate-300 transition hover:border-cyan-300/30 hover:text-white"
         >
           <Menu size={20} />
@@ -277,7 +281,7 @@ export default function Sidebar() {
       {open && (
         <div className="fixed inset-0 z-50 md:hidden">
           <button
-            aria-label="Menü schließen"
+            aria-label="MenÃ¼ schlieÃŸen"
             onClick={() => setOpen(false)}
             className="jarvis-fade absolute inset-0 h-full w-full cursor-default bg-black/70"
           />
@@ -288,7 +292,7 @@ export default function Sidebar() {
 
               <button
                 onClick={() => setOpen(false)}
-                aria-label="Menü schließen"
+                aria-label="MenÃ¼ schlieÃŸen"
                 className="rounded-xl border border-white/10 p-2 text-slate-300 transition hover:border-cyan-300/30 hover:text-white"
               >
                 <X size={18} />

@@ -135,12 +135,17 @@ export function itemRoutes(config: CrudConfig, routeName: string) {
           if (db === null) return noDb();
 
           const outcome = await handlers.remove(db, await idOf(route, "id"));
+          const mapped = outcomeStatus(outcome);
 
-          if (!outcome.ok) {
-            return fail("bad-request", "Ungültige Anfrage.", 400);
+          if (mapped.status === "ok" && outcome.ok) {
+            return ok({ deleted: true });
           }
 
-          return ok({ deleted: true });
+          if (mapped.status === "not-found") {
+            return fail("not-found", mapped.message, 404);
+          }
+
+          return fail("bad-request", mapped.message, 400);
         } catch (error) {
           return failFromUnknown(routeName, error);
         }

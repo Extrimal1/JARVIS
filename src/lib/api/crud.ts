@@ -186,6 +186,18 @@ export function crudHandlers(config: CrudConfig) {
     db: DbClient,
     id: string,
   ): Promise<CrudOutcome<null>> {
+    // Existence check first: missing-or-foreign rows surface as
+    // "missing" (same as update) instead of a silent no-op success.
+    const current = await dbGetOne<Record<string, unknown>>(
+      db,
+      config.table,
+      id,
+    );
+
+    if (current === null) {
+      return { ok: false, missing: true };
+    }
+
     await dbDelete(db, config.table, id);
 
     return { ok: true, data: null };

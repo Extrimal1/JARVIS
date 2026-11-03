@@ -2,7 +2,7 @@ import type { CalendarEvent } from "@/src/lib/calendar";
 import type { FinanceData } from "@/src/lib/finance";
 import type { QuizQuestion } from "@/src/lib/quiz";
 import type { Deadline } from "@/src/lib/briefing";
-import type { Task } from "@/src/lib/tasks";
+import { isTaskOverdue, type Task } from "@/src/lib/tasks";
 
 /**
  * Dashboard notifications derived ONLY from real loaded data. Each
@@ -60,9 +60,9 @@ export function buildNotifications(input: {
   const notifications: DashboardNotification[] = [];
 
   if (input.loaded.tasks) {
-    // The task model carries a free-form time field (no dates), so
-    // "overdue" is unknowable — high-priority open tasks are the
-    // honest urgency signal. Never guess dates.
+    // High-priority open tasks are the urgency signal for undated
+    // work; tasks WITH a due date additionally get a real overdue
+    // alert below. Never guess dates for tasks without one.
     const urgent = input.tasks.filter(
       (task) => !task.done && task.priority === "Hoch",
     );
@@ -81,6 +81,23 @@ export function buildNotifications(input: {
       });
     }
 
+    const overdue = input.tasks.filter((task) =>
+      isTaskOverdue(task, input.todayISO),
+    );
+
+    if (overdue.length > 0) {
+      notifications.push({
+        id: "tasks-overdue",
+        severity: "alert",
+        title: `${overdue.length} überfällige ${overdue.length === 1 ? "Aufgabe" : "Aufgaben"}`,
+        detail:
+          overdue
+            .slice(0, 2)
+            .map((task) => task.title)
+            .join(" · ") + (overdue.length > 2 ? " · …" : ""),
+        href: "/#aufgaben",
+      });
+    }
   }
 
   if (input.loaded.events) {

@@ -20,13 +20,14 @@ import {
 import Link from "next/link";
 import Sidebar from "@/src/components/Sidebar";
 import { useToday } from "@/src/hooks/useToday";
-import { useMemory } from "@/src/lib/db/useModules";
+import { useMemory, useUserSettings } from "@/src/lib/db/useModules";
 import {
   MEMORY_CATEGORY_LABELS,
   MEMORY_CATEGORIES,
   MEMORY_ENABLED_KEY,
   activeMemory,
   createMemoryEntry,
+  detectSecretBlock,
   detectSensitiveHint,
   isExpired,
   needsReview,
@@ -36,6 +37,7 @@ import {
   type MemoryEntry,
   type MemoryOrigin,
 } from "@/src/lib/memory";
+import { isMemoryEnabledSetting } from "@/src/lib/settings";
 
 const DATE_FORMAT = new Intl.DateTimeFormat("de-DE", {
   day: "2-digit",
@@ -216,6 +218,7 @@ function MemoryForm({
 
 export default function MemoryPage() {
   const memoryStore = useMemory();
+  const userSettings = useUserSettings();
   const entries = memoryStore.items;
   const today = useToday();
   const [search, setSearch] = useState("");
@@ -226,6 +229,7 @@ export default function MemoryPage() {
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
   const [enabled, setEnabled] = useState(true);
+  const [syncError, setSyncError] = useState(false);
 
   useEffect(() => {
     // Mount-gated: prerendered HTML must not depend on localStorage.
@@ -239,6 +243,14 @@ export default function MemoryPage() {
     }
   }, []);
 
+  // Cloud side of the kill-switch (synced in cloud mode): either
+  // side can pause memory everywhere. While settings load, only the
+  // local toggle decides.
+  const cloudMemoryEnabled = userSettings.loading
+    ? true
+    : isMemoryEnabledSetting(userSettings.data);
+  const effectiveEnabled = enabled && cloudMemoryEnabled;
+
   function setMemoryEnabled(next: boolean) {
     setEnabled(next);
 
@@ -247,6 +259,16 @@ export default function MemoryPage() {
     } catch {
       // Private mode: applies to this session only.
     }
+
+    // Sync everywhere (cloud mode); a failure only affects other
+    // devices — this device follows the local toggle immediately.
+    void userSettings
+      .save({ ...userSettings.data, memoryEnabled: next })
+      .then((result) => {
+        if (!result.ok) setSyncError(true);
+        else setSyncError(false);
+      })
+      .catch(() => setSyncError(true));
   }
 
   const visible = useMemo(() => {
@@ -292,6 +314,14 @@ export default function MemoryPage() {
   async function saveDraft(input: FormInput): Promise<string | null> {
     if (input.title.trim() === "" || input.content.trim() === "") {
       return "Titel und Inhalt dürfen nicht leer sein.";
+    }
+
+    const blocked = detectSecretBlock(
+      `${input.title.trim()}\n${input.content.trim()}`,
+    );
+
+    if (blocked.length > 0) {
+      return `Nicht gespeichert: sieht nach ${blocked.join(", ")} aus. Geheimnisse werden nie gespeichert — nutze dafür einen Passwort-Manager.`;
     }
 
     if (draft === null) return "Kein Entwurf geöffnet.";
@@ -422,10 +452,18 @@ export default function MemoryPage() {
               Gedächtnis für Assistent & Übersicht verwenden
             </label>
             <p className="w-full text-xs leading-5 text-slate-500 sm:w-auto sm:flex-1">
-              {enabled
+              {effectiveEnabled
                 ? "Dauerhaftes Wissen (diese Seite) fließt in Antworten ein. Der Chat-Verlauf bleibt temporär und wird nie automatisch gespeichert."
-                : "Pausiert: Einträge bleiben gespeichert, werden aber weder vom Assistenten noch in der Übersicht verwendet."}
+                : enabled
+                  ? "Auf einem anderen Gerät pausiert — das Gedächtnis ist geräteübergreifend pausiert. Schalte den Schalter aus und wieder ein, um es überall zu aktivieren."
+                  : "Pausiert: Einträge bleiben gespeichert, werden aber weder vom Assistenten noch in der Übersicht verwendet."}
             </p>
+            {syncError && (
+              <p className="w-full text-xs text-amber-200">
+                Synchronisierung fehlgeschlagen — auf diesem Gerät gilt die
+                Einstellung trotzdem.
+              </p>
+            )}
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2 text-xs" aria-live="polite">

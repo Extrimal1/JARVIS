@@ -1,6 +1,7 @@
 import {
   isCalendarEvent,
   isCalendarEventList,
+  timeToMinutes,
 } from "@/src/lib/calendar";
 import {
   pickPatch,
@@ -8,6 +9,14 @@ import {
   type CheckResult,
   type CrudConfig,
 } from "../crud";
+
+/** The UI and the assistant both enforce this; the API must not be softer. */
+function endsAfterStart(start: string, end: string): boolean {
+  const startMin = timeToMinutes(start);
+  const endMin = timeToMinutes(end);
+
+  return startMin !== null && endMin !== null && endMin > startMin;
+}
 
 function toDomain(row: Record<string, unknown>): unknown {
   return {
@@ -30,6 +39,10 @@ export const calendarConfig: CrudConfig = {
   checkCreate: (_db, body) => {
     if (!isCalendarEvent(body) || requireId(body) === null) {
       return { message: "Ungültiger Termin." };
+    }
+
+    if (!endsAfterStart(body.start, body.end)) {
+      return { message: "Das Ende muss nach dem Beginn liegen." };
     }
 
     return {
@@ -67,6 +80,12 @@ export const calendarConfig: CrudConfig = {
 
     if (!isCalendarEvent(merged)) {
       return { message: "Ungültige Änderung." };
+    }
+
+    if (
+      !endsAfterStart(merged.start as string, merged.end as string)
+    ) {
+      return { message: "Das Ende muss nach dem Beginn liegen." };
     }
 
     return {

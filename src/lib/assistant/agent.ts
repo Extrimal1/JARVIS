@@ -328,7 +328,7 @@ export const MODEL_PARAMS: Record<string, string> = {
   "finance.create":
     '{"transaction": {title, amountCents (ganzzahlig > 0), type income|expense, category, date YYYY-MM-DD, currency EUR, note}}',
   "tasks.create":
-    '{"task": {title, time ("HH:MM" oder "Keine Frist"), priority Niedrig|Mittel|Hoch}}',
+    '{"task": {title, time ("HH:MM" oder "Keine Frist"), priority Niedrig|Mittel|Hoch, dueDate? "YYYY-MM-DD"}}',
 };
 
 function toolCatalog(granted: ToolPermission[]): string {

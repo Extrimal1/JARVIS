@@ -470,6 +470,9 @@ function batchToDomain(row: Record<string, unknown>): unknown {
     importedAt: row.imported_at,
     statementMonth: row.statement_month ?? "",
     count: typeof row.count === "number" ? row.count : 0,
+    ...(typeof row.sha256 === "string" && row.sha256 !== ""
+      ? { sha256: row.sha256 }
+      : {}),
   };
 }
 
@@ -506,6 +509,9 @@ export const batchesConfig: CrudConfig = {
         count: record.count,
         storage_path:
           typeof record.storagePath === "string" ? record.storagePath : "",
+        ...(typeof record.sha256 === "string" && record.sha256 !== ""
+          ? { sha256: record.sha256 }
+          : {}),
       },
     };
   },

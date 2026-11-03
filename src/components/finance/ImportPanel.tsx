@@ -45,6 +45,7 @@ import {
   detectDuplicates,
   listImportPdfs,
   reviewRowsToTransactions,
+  sha256HexOf,
   type ImportBatchMeta,
   type ReviewRow,
 } from "@/src/lib/finance/importStore";
@@ -123,6 +124,7 @@ export function ImportPanel({
   const [rows, setRows] = useState<ReviewRow[]>([]);
   const [fileName, setFileName] = useState("");
   const [fileSize, setFileSize] = useState(0);
+  const [fileHash, setFileHash] = useState("");
   const [statementMonth, setStatementMonth] = useState(displayMonthKey);
   const [pendingFile, setPendingFile] = useState<{
     name: string;
@@ -161,6 +163,7 @@ export function ImportPanel({
     setRows([]);
     setFileName("");
     setFileSize(0);
+    setFileHash("");
     setPendingFile(null);
     setError(null);
     setNotes([]);
@@ -263,13 +266,27 @@ export function ImportPanel({
       return;
     }
 
-    const same = alreadyImported(batches, file.name, file.size);
+    // Content hash ("" when WebCrypto is unavailable): distinguishes
+    // same-size different files and catches renames of known files.
+    let hash = "";
+
+    try {
+      hash = await sha256HexOf(await file.arrayBuffer());
+    } catch {
+      hash = "";
+    }
+
+    setFileHash(hash);
+
+    const same = alreadyImported(batches, file.name, file.size, hash);
 
     if (same !== null) {
       fileRef.current = file;
       setPendingFile({ name: file.name, size: file.size });
       setNotes([
-        `„${file.name}“ wurde bereits am ${DATE_FORMAT.format(new Date(same.importedAt))} importiert. Trotzdem fortfahren?`,
+        same.fileName !== file.name
+          ? `Derselbe Inhalt wurde bereits am ${DATE_FORMAT.format(new Date(same.importedAt))} als „${same.fileName}“ importiert. Trotzdem fortfahren?`
+          : `„${file.name}“ wurde bereits am ${DATE_FORMAT.format(new Date(same.importedAt))} importiert. Trotzdem fortfahren?`,
       ]);
       return;
     }
@@ -418,6 +435,7 @@ export function ImportPanel({
           fileName: file.name,
           fileSize: file.size,
           statementMonth,
+          ...(fileHash === "" ? {} : { sha256: fileHash }),
         },
         file,
       );

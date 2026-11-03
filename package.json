@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint",
+    "lint": "eslint app src tests proxy.ts",
     "test": "node --test --import ./tests/register.mjs \"tests/*.test.ts\""
   },
   "dependencies": {

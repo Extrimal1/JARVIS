@@ -62,7 +62,7 @@ const OLLAMA_SYSTEM = `Du bist die Verstehens-Komponente von J.A.R.V.I.S., einem
 {"type":"finance.list","limit":10}
 {"type":"finance.summary","monthKey":"YYYY-MM"|null,"from":"YYYY-MM-DD"|null,"to":"YYYY-MM-DD"|null,"category":"..."|null,"label":"..."}
 {"type":"memory.create","entry":{"category":"preferences|goals|study|finance|lifestyle|assistant","title":"...","content":"..."}}
-{"type":"tasks.create","task":{"title":"...","time":"HH:MM oder Keine Frist","priority":"Niedrig|Mittel|Hoch"}}
+{"type":"tasks.create","task":{"title":"...","time":"HH:MM oder Keine Frist","priority":"Niedrig|Mittel|Hoch","dueDate?":"YYYY-MM-DD"}}
 {"type":"briefing.today"}
 {"type":"calendar.today"}
 {"type":"calendar.upcoming","days?":7}

@@ -6,8 +6,27 @@ import {
   supabaseEnv,
 } from "@/src/lib/supabase/supabase";
 import { fail, failFromUnknown, ok, readJson } from "@/src/lib/api/respond";
+import {
+  checkRateLimit,
+  LOGIN_RATE_LIMIT,
+  type RateLimitStore,
+} from "@/src/lib/api/rateLimit";
 
 /** POST /api/auth/login { email, password } → sets httpOnly session cookies. */
+
+const LOGIN_ATTEMPTS: RateLimitStore = new Map();
+
+function clientIp(request: NextRequest): string {
+  const forwarded = request.headers.get("x-forwarded-for");
+
+  if (forwarded !== null) {
+    const first = forwarded.split(",")[0]?.trim();
+
+    if (first !== undefined && first !== "") return first;
+  }
+
+  return "unknown";
+}
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const env = supabaseEnv();
@@ -31,6 +50,24 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     if (typeof email !== "string" || typeof password !== "string") {
       return fail("bad-request", "E-Mail und Passwort erforderlich.", 400);
+    }
+
+    // Per-IP+account sliding window: failed AND successful attempts
+    // count, so credential stuffing cannot probe freely. The key
+    // uses the normalized email to stop case-variant evasion.
+    const allowed = checkRateLimit(
+      LOGIN_ATTEMPTS,
+      `${clientIp(request)}:${email.trim().toLowerCase()}`,
+      LOGIN_RATE_LIMIT,
+      Date.now(),
+    );
+
+    if (!allowed) {
+      return fail(
+        "rate-limited",
+        "Zu viele Anmeldeversuche. Bitte warte einige Minuten und versuche es erneut.",
+        429,
+      );
     }
 
     try {

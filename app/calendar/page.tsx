@@ -462,6 +462,12 @@ export default function CalendarPage() {
                   {days.map((day) => {
                     const iso = toISODateLocal(day);
                     const isToday = iso === todayISO;
+                    // Read-only exam overlay (same source as month/day
+                    // views): exams live in the study module.
+                    const dayExams =
+                      filter === "all" || filter === "exam"
+                        ? studyExams.filter((exam) => exam.date === iso)
+                        : [];
 
                     return (
                       <div key={iso} className="px-2 py-3 text-center">
@@ -482,6 +488,29 @@ export default function CalendarPage() {
                         >
                           {day.getDate()}
                         </p>
+
+                        {dayExams.length > 0 && (
+                          <div className="mt-1 space-y-1">
+                            {dayExams.slice(0, 2).map((exam) => (
+                              <Link
+                                key={exam.id}
+                                href="/study?tab=prep&prep=exams"
+                                title={`Prüfung (Studium): ${exam.title}`}
+                                className="block truncate rounded-md border-l-2 border-violet-300 bg-violet-300/10 px-1.5 py-0.5 text-left text-[10px] leading-tight text-violet-200 transition hover:bg-violet-300/20"
+                              >
+                                {exam.title}
+                              </Link>
+                            ))}
+                            {dayExams.length > 2 && (
+                              <Link
+                                href="/study?tab=prep&prep=exams"
+                                className="block text-left text-[10px] text-slate-500 transition hover:text-slate-300"
+                              >
+                                + {dayExams.length - 2} weitere
+                              </Link>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}

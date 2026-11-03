@@ -494,7 +494,8 @@ export const ASSISTANT_TOOLS: ToolDefinition[] = [
         name: "task",
         type: "NewTaskFields",
         required: true,
-        description: "Titel, Zeit (HH:MM oder freie Angabe), Priorität (Niedrig/Mittel/Hoch).",
+        description:
+          "Titel, Zeit (HH:MM oder freie Angabe), Priorität (Niedrig/Mittel/Hoch), optional Fälligkeitsdatum (dueDate YYYY-MM-DD).",
       },
     ],
     output: "Task",

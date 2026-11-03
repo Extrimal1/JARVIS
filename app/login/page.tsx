@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { Command, LogIn } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { safeNext } from "@/src/lib/safeNext";
 
 /** Email+password login (cloud mode only; unused in local mode). */
 
@@ -23,7 +24,7 @@ export default function LoginPage() {
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const next = searchParams.get("next") ?? "/";
+  const next = safeNext(searchParams.get("next"));
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +37,7 @@ function LoginForm() {
     fetch("/api/auth/session")
       .then((res) => {
         if (!cancelled && res.ok) {
-          router.replace(next.startsWith("/") ? next : "/");
+          router.replace(next);
         }
       })
       .catch(() => {
@@ -82,7 +83,7 @@ function LoginForm() {
         return;
       }
 
-      router.replace(next.startsWith("/") ? next : "/");
+      router.replace(next);
     } catch {
       setError("Keine Verbindung zum Server.");
     } finally {

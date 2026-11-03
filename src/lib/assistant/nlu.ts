@@ -1872,6 +1872,7 @@ const TASK_CREATE_SIGNAL =
 
 function tryTasksCreate(
   lexer: Lexer,
+  ctx: NluContext,
   locale: AssistantLocale,
 ): AssistantPlan | null {
   const lower = lexer.lower;
@@ -1914,6 +1915,11 @@ function tryTasksCreate(
     if (triggerMatch[0].length === 0) break;
   }
 
+  // Optional due date ("morgen", "am Freitag", "5.11."): claimed so
+  // it never leaks into the title. Year-less dates resolve to the
+  // next upcoming occurrence (never the past).
+  const due = extractDate(lexer, ctx.todayISO, false);
+
   const title = cleanTitle(lexer.remaining()).replace(/^:\s*/, "");
 
   if (title === "") return clarify("task", locale);
@@ -1924,6 +1930,7 @@ function tryTasksCreate(
       title: title.slice(0, 200),
       time: timeMatch !== null ? `${timeMatch[1].padStart(2, "0")}:${timeMatch[2]}` : "Keine Frist",
       priority,
+      ...(due === null ? {} : { dueDate: due.date }),
     },
   };
 }
@@ -2200,7 +2207,7 @@ export function parseCommand(text: string, ctx: NluContext): ParseResult {
 
   const plan =
     tryMemoryCreate(new Lexer(source), locale) ??
-    tryTasksCreate(new Lexer(source), locale) ??
+    tryTasksCreate(new Lexer(source), ctx, locale) ??
     tryFinanceCreate(new Lexer(source), ctx, locale) ??
     tryCalendarDelete(new Lexer(source), locale) ??
     tryCalendarUpdate(new Lexer(source), ctx, locale) ??

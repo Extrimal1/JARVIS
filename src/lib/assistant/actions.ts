@@ -208,6 +208,8 @@ export type NewTaskFields = {
   /** Free-form time label (HH:MM or "Keine Frist"). */
   time: string;
   priority: "Niedrig" | "Mittel" | "Hoch";
+  /** Optional due date (YYYY-MM-DD). Absent means no deadline. */
+  dueDate?: string;
 };
 
 export type ClarifyOption = {
@@ -405,7 +407,8 @@ function isNewTaskFields(value: unknown): value is NewTaskFields {
     value.time.length > 0 &&
     value.time.length <= 64 &&
     typeof value.priority === "string" &&
-    (TASK_PRIORITIES as readonly string[]).includes(value.priority)
+    (TASK_PRIORITIES as readonly string[]).includes(value.priority) &&
+    (value.dueDate === undefined || isISODateString(value.dueDate))
   );
 }
 
@@ -632,7 +635,7 @@ export function describePlan(
     case "memory.create":
       return `${label}: „${plan.entry.title}“`;
     case "tasks.create":
-      return `${label}: „${plan.task.title}“ · ${plan.task.time} · ${plan.task.priority}`;
+      return `${label}: „${plan.task.title}“ · ${plan.task.time} · ${plan.task.priority}${plan.task.dueDate !== undefined ? ` · fällig ${plan.task.dueDate.slice(8, 10)}.${plan.task.dueDate.slice(5, 7)}.` : ""}`;
     case "lifestyle.placesSearch": {
       const bits = [plan.query, plan.near].filter(
         (bit): bit is string => typeof bit === "string" && bit !== "",

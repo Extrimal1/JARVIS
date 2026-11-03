@@ -19,6 +19,7 @@ export type ApiErrorCode =
   | "not-found"
   | "conflict"
   | "payload-too-large"
+  | "rate-limited"
   | "cloud-not-configured"
   | "migration-pending"
   | "worker-unavailable"

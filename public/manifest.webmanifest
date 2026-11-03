@@ -1,0 +1,19 @@
+{
+  "name": "J.A.R.V.I.S. · Personal AI Workspace",
+  "short_name": "JARVIS",
+  "description": "Persönlicher KI-Assistent für Studium, Aufgaben, Termine und Finanzen.",
+  "lang": "de",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

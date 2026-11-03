@@ -37,7 +37,12 @@ import {
   monthLabel,
 } from "@/src/lib/finance";
 import { EMPTY_STUDY } from "@/src/lib/study";
-import { type Task } from "@/src/lib/tasks";
+import {
+  NO_TASKS,
+  formatDueDate,
+  isTaskOverdue,
+  type Task,
+} from "@/src/lib/tasks";
 import { createId } from "@/src/lib/ids";
 import { buildAssistantContext } from "@/src/lib/assistant/context";
 import {
@@ -56,31 +61,9 @@ import {
   useSavedIds,
   useStudy,
   useTasks,
+  useUserSettings,
 } from "@/src/lib/db/useModules";
-
-const initialTasks: Task[] = [
-  {
-    id: "seed-1",
-    title: "Vererbung in Java wiederholen",
-    time: "10:30",
-    done: false,
-    priority:"Hoch",
-  },
-  {
-    id: "seed-2",
-    title: "Unterlagen für die nächste Vorlesung vorbereiten",
-    time: "13:00",
-    done: false,
-    priority:"Mittel",
-  },
-  {
-    id: "seed-3",
-    title: "Aufgaben für die Woche überprüfen",
-    time: "16:30",
-    done: true,
-    priority:"Niedrig",
-  },
-];
+import { isMemoryEnabledSetting } from "@/src/lib/settings";
 
 function getGreeting(hour: number) {
   if (hour >= 5 && hour < 11) return "Guten Morgen.";
@@ -90,7 +73,9 @@ function getGreeting(hour: number) {
 }
 
 export default function Home() {
-  const tasksStore = useTasks(initialTasks);
+  // No seed tasks: a fresh profile shows an honest empty state, never
+  // invented demo items. Existing stored tasks are untouched.
+  const tasksStore = useTasks(NO_TASKS);
   const tasks = tasksStore.items;
   const tasksLoaded = !tasksStore.loading;
   const eventsStore = useCalendarEvents();
@@ -122,6 +107,7 @@ export default function Home() {
   const quiz = quizStore.items;
   const quizLoaded = !quizStore.loading;
   const [memoryEnabled, setMemoryEnabled] = useState(true);
+  const userSettings = useUserSettings();
 
   useEffect(() => {
     // Mount-gated: prerendered HTML must not depend on localStorage.
@@ -129,11 +115,20 @@ export default function Home() {
     setMemoryEnabled(isMemoryEnabledClient());
   }, []);
 
-  // Kill-switch (Memory page): disabled = dashboard behaves as if no
-  // entries exist. Nothing is deleted; the toggle explains itself.
+  // Kill-switch (Memory page): disabled locally OR in the synced
+  // settings = dashboard behaves as if no entries exist. Nothing is
+  // deleted; while cloud settings load, the local toggle decides.
+  const cloudMemoryEnabled = userSettings.loading
+    ? true
+    : isMemoryEnabledSetting(userSettings.data);
+  const effectiveMemoryEnabled = memoryEnabled && cloudMemoryEnabled;
   const effectiveMemory = useMemo(
-    () => (memoryEnabled ? memory : []),
-    [memoryEnabled, memory],
+    () => (effectiveMemoryEnabled ? memory : []),
+    [effectiveMemoryEnabled, memory],
+  );
+  const visibleMemoryCount = useMemo(
+    () => memory.filter((entry) => !entry.archived).length,
+    [memory],
   );
 
   const context = useMemo(() => {
@@ -245,6 +240,7 @@ export default function Home() {
   const [showTaskForm, setShowTaskForm] = useState(false);
 const [newTaskTitle, setNewTaskTitle] = useState("");
 const [newTaskTime, setNewTaskTime] = useState("");
+const [newTaskDue, setNewTaskDue] = useState("");
 const [newTaskPriority, setNewTaskPriority] =
   useState<Task["priority"]>("Mittel");
 
@@ -279,6 +275,7 @@ const [newTaskPriority, setNewTaskPriority] =
     time: newTaskTime || "Keine Frist",
     done: false,
     priority: newTaskPriority,
+    ...(newTaskDue === "" ? {} : { dueDate: newTaskDue }),
   };
 
   const result = await tasksStore.create(newTask);
@@ -287,6 +284,7 @@ const [newTaskPriority, setNewTaskPriority] =
 
   setNewTaskTitle("");
   setNewTaskTime("");
+  setNewTaskDue("");
   setNewTaskPriority("Mittel");
   setShowTaskForm(false);
 }
@@ -343,7 +341,6 @@ const [newTaskPriority, setNewTaskPriority] =
                   <ConversationPanel
                     module="dashboard"
                     variant="compact"
-                    initialTasks={initialTasks}
                     suggestions={[
                       "Plane meinen Tag",
                       "Erkläre mir Java",
@@ -584,7 +581,9 @@ const [newTaskPriority, setNewTaskPriority] =
                             </span>
                           )}
                           <span className="shrink-0 text-xs text-slate-500">
-                            {task.time}
+                            {task.dueDate !== undefined
+                              ? `${formatDueDate(task.dueDate)} · ${task.time}`
+                              : task.time}
                           </span>
                         </li>
                       ))}
@@ -769,15 +768,27 @@ const [newTaskPriority, setNewTaskPriority] =
       />
     </label>
 
-    <label className="block text-xs text-slate-400">
-      Uhrzeit (optional)
-      <input
-        type="time"
-        value={newTaskTime}
-        onChange={(event) => setNewTaskTime(event.target.value)}
-        className="mt-2 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-sm text-white outline-none focus:border-cyan-300/50"
-      />
-    </label>
+    <div className="grid grid-cols-2 gap-3">
+      <label className="block text-xs text-slate-400">
+        Uhrzeit (optional)
+        <input
+          type="time"
+          value={newTaskTime}
+          onChange={(event) => setNewTaskTime(event.target.value)}
+          className="mt-2 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-sm text-white outline-none focus:border-cyan-300/50"
+        />
+      </label>
+
+      <label className="block text-xs text-slate-400">
+        Fällig am (optional)
+        <input
+          type="date"
+          value={newTaskDue}
+          onChange={(event) => setNewTaskDue(event.target.value)}
+          className="mt-2 w-full rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-sm text-white outline-none focus:border-cyan-300/50"
+        />
+      </label>
+    </div>
 
     <label className="block text-xs text-slate-400">
       Priorität
@@ -820,7 +831,18 @@ const [newTaskPriority, setNewTaskPriority] =
               )}
 
               <div className="mt-5 space-y-2">
-                
+                {tasksLoaded && tasks.length === 0 && (
+                  <div className="rounded-2xl border border-dashed border-white/10 p-6 text-center">
+                    <p className="text-sm font-medium text-slate-200">
+                      Keine Aufgaben
+                    </p>
+                    <p className="mx-auto mt-2 max-w-xs text-xs leading-5 text-slate-500">
+                      Lege oben deine erste Aufgabe an — oder bitte den
+                      Assistenten darum („Erstelle eine Aufgabe …“).
+                    </p>
+                  </div>
+                )}
+
 {tasks.map((task) => (
   <div
     key={task.id}
@@ -861,6 +883,20 @@ const [newTaskPriority, setNewTaskPriority] =
           <Clock3 className="mr-1 inline" size={12} />
           {task.time}
         </span>
+
+        {task.dueDate !== undefined && (
+          <span
+            className={`rounded-full px-2 py-1 text-[10px] ${
+              today !== null && isTaskOverdue(task, today)
+                ? "bg-rose-400/10 text-rose-300"
+                : "bg-cyan-300/10 text-cyan-200"
+            }`}
+          >
+            {today !== null && isTaskOverdue(task, today)
+              ? `Überfällig · ${formatDueDate(task.dueDate)}`
+              : `Fällig ${formatDueDate(task.dueDate)}`}
+          </span>
+        )}
 
         <span
           className={`rounded-full px-2 py-1 text-[10px] ${
@@ -961,9 +997,9 @@ const [newTaskPriority, setNewTaskPriority] =
                     detail={
                       !memoryLoaded
                         ? "Wird geladen …"
-                        : !memoryEnabled
+                        : !effectiveMemoryEnabled
                           ? "Gedächtnis pausiert"
-                          : `${memory.length} Einträge`
+                          : `${visibleMemoryCount} Einträge`
                     }
                   />
                 </div>

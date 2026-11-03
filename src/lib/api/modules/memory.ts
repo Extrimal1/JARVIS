@@ -1,4 +1,5 @@
 import {
+  detectSecretBlock,
   isMemoryEntry,
   isMemoryEntryList,
   type MemoryEntry,
@@ -78,6 +79,13 @@ export const memoryConfig: CrudConfig = {
       return { message: "Abgeleitete Einträge brauchen eine Begründung." };
     }
 
+    if (detectSecretBlock(`${body.title}\n${body.content}`).length > 0) {
+      return {
+        message:
+          "Geheimnisse (Passwörter, Schlüssel, Token) werden nie gespeichert.",
+      };
+    }
+
     return { row: toRow(body) };
   },
   checkUpdate: (_db, patch, existing): CheckResult => {
@@ -100,6 +108,13 @@ export const memoryConfig: CrudConfig = {
 
     if (item.origin === "derived" && (item.evidence ?? "") === "") {
       return { message: "Abgeleitete Einträge brauchen eine Begründung." };
+    }
+
+    if (detectSecretBlock(`${item.title}\n${item.content}`).length > 0) {
+      return {
+        message:
+          "Geheimnisse (Passwörter, Schlüssel, Token) werden nie gespeichert.",
+      };
     }
 
     const row = toRow(item);

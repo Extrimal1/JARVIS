@@ -15,8 +15,10 @@ import {
   useSavedIds,
   useStudy,
   useTasks,
+  useUserSettings,
 } from "@/src/lib/db/useModules";
-import type { Task } from "@/src/lib/tasks";
+import { NO_TASKS, type Task } from "@/src/lib/tasks";
+import { isMemoryEnabledSetting } from "@/src/lib/settings";
 import { EMPTY_STUDY, type StudyData } from "@/src/lib/study";
 import { createId } from "@/src/lib/ids";
 import type { AssistantLocale } from "@/src/lib/assistant/actions";
@@ -73,8 +75,6 @@ import { searchLivePlaces } from "@/src/lib/lifestyle/searchClient";
  * ephemeral confirm/pick/undo/error cards for the latest turn.
  * Persistence itself lives in the conversation service + resources.
  */
-
-const NO_TASKS: Task[] = [];
 
 const SELECTED_THREAD_KEY = "jarvis-conversation-selected";
 
@@ -160,6 +160,7 @@ export function useConversation(options: UseConversationOptions) {
   const threads = useConversationThreads();
   const messages = useConversationMessages();
   const recordings = useRecordings();
+  const userSettings = useUserSettings();
   const today = useToday();
 
   const [engine, setEngine] = useState<EngineStatus | null>(null);
@@ -449,9 +450,16 @@ export function useConversation(options: UseConversationOptions) {
             savedIds: savedIds.ids,
             plans: plans.items,
             prefs: prefs.data,
-            // Kill-switch (Memory page): disabled = the agent sees no
-            // entries. Saving stays possible; nothing is deleted.
-            memory: isMemoryEnabledClient() ? memory.items : [],
+            // Kill-switch (Memory page): disabled locally OR in the
+            // synced settings = the agent sees no entries. Saving
+            // stays possible; nothing is deleted. While cloud
+            // settings load, the local toggle decides.
+            memory:
+              isMemoryEnabledClient() &&
+              (userSettings.loading ||
+                isMemoryEnabledSetting(userSettings.data))
+                ? memory.items
+                : [],
             sessions: recordings.sessions,
             recordings: recordings.recordings,
             todayISO: currentToday,
@@ -610,6 +618,7 @@ export function useConversation(options: UseConversationOptions) {
       tasks,
       threads,
       today,
+      userSettings,
     ],
   );
 

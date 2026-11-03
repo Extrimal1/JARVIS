@@ -5,9 +5,11 @@ import { parseISODateLocal } from "@/src/lib/calendar";
  * Personal Memory: user-approved preferences, goals, and notes.
  *
  * Nothing is stored automatically. Derived observations (a future
- * feature) must be approved before they count as memory. Sensitive
- * content is never auto-stored; the UI warns when user-entered text
- * merely looks sensitive (IBAN, password) without blocking the save.
+ * feature) must be approved before they count as memory. Concrete
+ * secrets (passwords, API keys, private keys, tokens) are NEVER
+ * stored: `createMemoryEntry` refuses them and the API validates
+ * again server-side. Merely sensitive-looking text (IBAN, long digit
+ * runs) only triggers a non-blocking UI warning.
  */
 
 export const MEMORY_STORAGE_KEY = "jarvis-memory";
@@ -121,6 +123,8 @@ export function createMemoryEntry(
 
   if (title === "" || content === "") return null;
   if (title.length > 120 || content.length > 2000) return null;
+  // Secrets are never stored, no matter the origin or approval state.
+  if (detectSecretBlock(`${title}\n${content}`).length > 0) return null;
 
   const reviewAt = input.reviewAt?.trim() || undefined;
   const expiresAt = input.expiresAt?.trim() || undefined;
@@ -222,6 +226,51 @@ export function detectSensitiveHint(text: string): string[] {
   const found: string[] = [];
 
   for (const { pattern, label } of SENSITIVE_PATTERNS) {
+    if (pattern.test(text) && !found.includes(label)) {
+      found.push(label);
+    }
+  }
+
+  return found;
+}
+
+/**
+ * Hard secret detection: high-precision patterns that BLOCK a save
+ * (page, assistant, and API all refuse). Only concrete credential
+ * material matches — merely mentioning "Passwort" or planning to
+ * "set up a password manager" never blocks.
+ */
+const SECRET_BLOCK_PATTERNS: { pattern: RegExp; label: string }[] = [
+  {
+    pattern: /(passwort|password|passwd|pwd)\s*[:=]\s*\S+/i,
+    label: "Passwort",
+  },
+  {
+    pattern:
+      /(api[_-]?key|api[_-]?secret|secret[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*\S+/i,
+    label: "API-Schlüssel",
+  },
+  {
+    pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/,
+    label: "Privater Schlüssel",
+  },
+  {
+    pattern:
+      /\b(sk-[A-Za-z0-9]{8,}|ghp_[A-Za-z0-9]{8,}|xox[bpas]-[A-Za-z0-9-]{8,}|AIza[A-Za-z0-9_-]{8,})\b/,
+    label: "Token",
+  },
+];
+
+/**
+ * Blocking check for concrete secrets. Returns the matched labels;
+ * empty means the text may be stored (soft hints still apply).
+ */
+export function detectSecretBlock(text: string): string[] {
+  const found: string[] = [];
+
+  for (const { pattern, label } of SECRET_BLOCK_PATTERNS) {
+    pattern.lastIndex = 0;
+
     if (pattern.test(text) && !found.includes(label)) {
       found.push(label);
     }

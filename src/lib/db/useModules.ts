@@ -659,6 +659,8 @@ export type ImportBatchInput = {
   fileName: string;
   fileSize: number;
   statementMonth: string;
+  /** SHA-256 hex of the file, when computed ("" or absent = unknown). */
+  sha256?: string;
 };
 
 export type FinanceResource = {
@@ -1109,7 +1111,14 @@ export function useFinance(): FinanceResource {
     > => {
       if (!CLOUD_ENABLED) {
         const batch: ImportBatchMeta = {
-          ...meta,
+          id: meta.id,
+          fileName: meta.fileName,
+          fileSize: meta.fileSize,
+          statementMonth: meta.statementMonth,
+          // Unknown hashes stay absent (never stored as "").
+          ...(meta.sha256 === undefined || meta.sha256 === ""
+            ? {}
+            : { sha256: meta.sha256 }),
           importedAt: new Date().toISOString(),
           count: rows.length,
         };

@@ -9,12 +9,17 @@ import { NextResponse, type NextRequest } from "next/server";
 
 const PUBLIC_PATHS = ["/login", "/manifest.webmanifest", "/favicon.ico"];
 
-// Public data endpoints (no login, no user data): health + weather + news.
+// Public data endpoints (no login, no user data): health, weather,
+// news, and the VAPID public key (public by design, RFC 8292).
+// The briefing dispatch is also cookie-exempt: external crons carry
+// no session cookie and authenticate via CRON_SECRET in the route.
 const PUBLIC_API_PREFIXES = [
   "/api/auth/",
   "/api/health",
   "/api/weather/",
   "/api/lifestyle/news",
+  "/api/briefing/public-key",
+  "/api/briefing/dispatch",
 ];
 
 export function proxy(request: NextRequest) {

@@ -153,7 +153,11 @@ export function buildAssistantContext(input: ContextInput): AssistantContext {
     ? getTodayEvents({ events: input.events, todayISO: input.todayISO })
     : null;
   const openTasks = fresh("tasks")
-    ? getOpenTasks({ tasks: input.tasks, nowTime: input.nowTime })
+    ? getOpenTasks({
+        tasks: input.tasks,
+        nowTime: input.nowTime,
+        todayISO: input.todayISO,
+      })
     : null;
   const deadlines = fresh("study")
     ? getStudyDeadlines({ study: input.study, todayISO: input.todayISO })
@@ -351,6 +355,9 @@ function buildInsights(input: {
 
   if (input.openTasks !== null && input.openTasks.overdue.length > 0) {
     const count = input.openTasks.overdue.length;
+    const pastDue = input.openTasks.overdue.filter(
+      (task) => task.dueDate !== undefined,
+    ).length;
 
     insights.push({
       id: "tasks-overdue",
@@ -361,7 +368,11 @@ function buildInsights(input: {
         .map((task) => task.title)
         .join(" · "),
       reason:
-        "Die Uhrzeit dieser Aufgaben liegt heute bereits in der Vergangenheit.",
+        pastDue === count
+          ? "Das Fälligkeitsdatum dieser Aufgaben liegt in der Vergangenheit."
+          : pastDue > 0
+            ? "Fälligkeitsdatum überschritten oder die Uhrzeit liegt heute bereits in der Vergangenheit."
+            : "Die Uhrzeit dieser Aufgaben liegt heute bereits in der Vergangenheit.",
       href: "/#aufgaben",
     });
   }

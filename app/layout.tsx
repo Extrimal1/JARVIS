@@ -6,6 +6,7 @@ export const metadata: Metadata = {
   title: "J.A.R.V.I.S. · Personal AI Workspace",
   description:
     "Persönlicher KI-Assistent für Studium, Aufgaben, Termine und Finanzen.",
+  manifest: "/manifest.webmanifest",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

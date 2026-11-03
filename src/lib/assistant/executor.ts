@@ -35,6 +35,7 @@ import {
 import { normalizeDescription } from "@/src/lib/finance/categories";
 import {
   createMemoryEntry,
+  detectSecretBlock,
   type MemoryCategory,
   type MemoryEntry,
 } from "@/src/lib/memory";
@@ -206,7 +207,13 @@ type Strings = {
   nonEuroNote: (count: number) => string;
   memorySaved: (title: string, category: string) => string;
   memoryUnavailable: string;
-  taskSaved: (title: string, time: string, priority: string) => string;
+  memorySecret: string;
+  taskSaved: (
+    title: string,
+    time: string,
+    priority: string,
+    dueDate: string | undefined,
+  ) => string;
   taskUnavailable: string;
 };
 
@@ -258,8 +265,10 @@ const STRINGS: Record<AssistantLocale, Strings> = {
       `Gemerkt (${category}): „${title}“.`,
     memoryUnavailable:
       "Der Speicher ist gerade nicht verfügbar — es wurde nichts gespeichert.",
-    taskSaved: (title, time, priority) =>
-      `Aufgabe gespeichert: „${title}“ · ${time} · ${priority}.`,
+    memorySecret:
+      "Das sieht nach einem Geheimnis aus (Passwort, Schlüssel oder Token) — Geheimnisse werden nie gespeichert.",
+    taskSaved: (title, time, priority, dueDate) =>
+      `Aufgabe gespeichert: „${title}“ · ${time} · ${priority}${dueDate !== undefined ? ` · fällig ${dueDate.slice(8, 10)}.${dueDate.slice(5, 7)}.` : ""}.`,
     taskUnavailable:
       "Die Aufgabenliste ist gerade nicht verfügbar — es wurde nichts gespeichert.",
   },
@@ -304,8 +313,10 @@ const STRINGS: Record<AssistantLocale, Strings> = {
     nonEuroNote: (count) => ` (без ${count} опер. в валюте).`,
     memorySaved: (title, category) => `Запомнил (${category}): «${title}».`,
     memoryUnavailable: "Хранилище сейчас недоступно — ничего не сохранено.",
-    taskSaved: (title, time, priority) =>
-      `Задача сохранена: «${title}» · ${time} · ${priority}.`,
+    memorySecret:
+      "Похоже на секрет (пароль, ключ или токен) — секреты никогда не сохраняются.",
+    taskSaved: (title, time, priority, dueDate) =>
+      `Задача сохранена: «${title}» · ${time} · ${priority}${dueDate !== undefined ? ` · срок ${dueDate.slice(8, 10)}.${dueDate.slice(5, 7)}.` : ""}.`,
     taskUnavailable: "Список задач сейчас недоступен — ничего не сохранено.",
   },
 };
@@ -380,8 +391,109 @@ function candidateLabel(event: CalendarEvent, locale: AssistantLocale): string {
 const REPORT_CACHE = new Map<string, ExecutionReport>();
 const INFLIGHT = new Map<string, Promise<ExecutionReport>>();
 
+/**
+ * Disk-backed idempotency: the in-memory cache alone forgets on
+ * reload/new tab, so a retried key would re-run. Persisted reports
+ * (validated on load, 24h TTL, capped count) survive reloads; undo
+ * payloads are plain ids/rows, so post-reload undo still works.
+ */
+const PERSISTED_REPORTS_KEY = "jarvis.executor.reports.v1";
+const PERSISTED_REPORTS_MAX = 20;
+const PERSISTED_REPORTS_TTL_MS = 24 * 60 * 60 * 1000;
+
+type PersistedReport = { key: string; report: ExecutionReport; at: number };
+
+function storage(): Storage | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function isExecutionReport(value: unknown): value is ExecutionReport {
+  if (typeof value !== "object" || value === null) return false;
+
+  const status = (value as Record<string, unknown>).status;
+
+  return (
+    status === "done" ||
+    status === "confirm" ||
+    status === "pick" ||
+    status === "error"
+  );
+}
+
+function readPersistedReports(nowMs: number): PersistedReport[] {
+  const store = storage();
+
+  if (store === null) return [];
+
+  let parsed: unknown = null;
+
+  try {
+    const raw = store.getItem(PERSISTED_REPORTS_KEY);
+
+    if (raw === null) return [];
+
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return [];
+  }
+
+  if (!Array.isArray(parsed)) return [];
+
+  const out: PersistedReport[] = [];
+
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null) continue;
+
+    const record = entry as Record<string, unknown>;
+
+    if (
+      typeof record.key !== "string" ||
+      record.key === "" ||
+      typeof record.at !== "number" ||
+      nowMs - record.at > PERSISTED_REPORTS_TTL_MS ||
+      !isExecutionReport(record.report)
+    ) {
+      continue;
+    }
+
+    out.push({
+      key: record.key,
+      report: record.report,
+      at: record.at,
+    });
+  }
+
+  return out;
+}
+
+function persistReport(key: string, report: ExecutionReport): void {
+  const store = storage();
+
+  if (store === null) return;
+
+  const nowMs = Date.now();
+  const kept = readPersistedReports(nowMs).filter(
+    (entry) => entry.key !== key,
+  );
+  kept.push({ key, report, at: nowMs });
+
+  try {
+    store.setItem(
+      PERSISTED_REPORTS_KEY,
+      JSON.stringify(kept.slice(-PERSISTED_REPORTS_MAX)),
+    );
+  } catch {
+    // Quota/private mode: memory cache still guards this session.
+  }
+}
+
 function cacheReport(key: string, report: ExecutionReport): ExecutionReport {
   REPORT_CACHE.set(key, report);
+  persistReport(key, report);
 
   if (REPORT_CACHE.size > 50) {
     const oldest = REPORT_CACHE.keys().next().value;
@@ -392,11 +504,28 @@ function cacheReport(key: string, report: ExecutionReport): ExecutionReport {
   return report;
 }
 
+function cachedReport(key: string): ExecutionReport | undefined {
+  const live = REPORT_CACHE.get(key);
+
+  if (live !== undefined) return live;
+
+  // Cold start (reload/new tab): hydrate one entry from disk.
+  const found = readPersistedReports(Date.now()).find(
+    (entry) => entry.key === key,
+  );
+
+  if (found === undefined) return undefined;
+
+  REPORT_CACHE.set(key, found.report);
+
+  return found.report;
+}
+
 async function runOnce(
   key: string,
   task: () => Promise<ExecutionReport>,
 ): Promise<ExecutionReport> {
-  const cached = REPORT_CACHE.get(key);
+  const cached = cachedReport(key);
 
   if (cached !== undefined) return cached;
 
@@ -422,10 +551,25 @@ async function runOnce(
   return run;
 }
 
-/** Test seam: forget cached reports. */
+/**
+ * Test seam: drop the memory cache only (simulates a reload — the
+ * persisted reports stay, so hydration can be verified).
+ */
+export function evictExecutionMemory(): void {
+  REPORT_CACHE.clear();
+  INFLIGHT.clear();
+}
+
+/** Test seam: forget cached reports (memory and persisted). */
 export function clearExecutionCache(): void {
   REPORT_CACHE.clear();
   INFLIGHT.clear();
+
+  try {
+    storage()?.removeItem(PERSISTED_REPORTS_KEY);
+  } catch {
+    // Non-fatal: the memory cache is already cleared.
+  }
 }
 
 // ------------------------------------------------------------------ create
@@ -550,6 +694,12 @@ async function executeMemoryCreate(
     return { status: "error", message: strings.memoryUnavailable };
   }
 
+  if (
+    detectSecretBlock(`${fields.title}\n${fields.content}`).length > 0
+  ) {
+    return { status: "error", message: strings.memorySecret };
+  }
+
   const built = createMemoryEntry({
     category: fields.category as MemoryCategory,
     title: fields.title,
@@ -595,6 +745,7 @@ async function executeTaskCreate(
     time: fields.time,
     done: false,
     priority: fields.priority,
+    ...(fields.dueDate === undefined ? {} : { dueDate: fields.dueDate }),
   };
 
   if (!isTask(task)) {
@@ -613,6 +764,7 @@ async function executeTaskCreate(
       result.data.title,
       result.data.time,
       result.data.priority,
+      result.data.dueDate,
     ),
     href: "/#aufgaben",
     undoLabel: strings.undo,

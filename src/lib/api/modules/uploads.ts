@@ -30,6 +30,8 @@ export type StatementUploadInput = {
   fileSize: number;
   statementMonth: string;
   count: number;
+  /** SHA-256 hex of the file, when the client computed one. */
+  sha256?: string;
 };
 
 export function validStatementUpload(body: unknown): StatementUploadInput | null {
@@ -51,17 +53,21 @@ export function validStatementUpload(body: unknown): StatementUploadInput | null
     !/^\d{4}-\d{2}$/.test(record.statementMonth) ||
     typeof record.count !== "number" ||
     !Number.isInteger(record.count) ||
-    record.count < 0
+    record.count < 0 ||
+    (record.sha256 !== undefined &&
+      (typeof record.sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/.test(record.sha256)))
   ) {
     return null;
   }
 
   return {
-    id: record.id,
-    fileName: record.fileName,
-    fileSize: record.fileSize,
-    statementMonth: record.statementMonth,
-    count: record.count,
+    id: record.id as string,
+    fileName: record.fileName as string,
+    fileSize: record.fileSize as number,
+    statementMonth: record.statementMonth as string,
+    count: record.count as number,
+    ...(typeof record.sha256 === "string" ? { sha256: record.sha256 } : {}),
   };
 }
 
@@ -83,20 +89,42 @@ export async function createStatementUpload(
     storagePath,
   );
 
-  const rows = await dbInsert<Record<string, unknown>>(
-    db,
-    "finance_import_batches",
-    [
-      {
-        id: input.id,
-        file_name: input.fileName,
-        file_size: input.fileSize,
-        statement_month: input.statementMonth,
-        count: input.count,
-        storage_path: storagePath,
-      },
-    ],
-  );
+  const row: Record<string, unknown> = {
+    id: input.id,
+    file_name: input.fileName,
+    file_size: input.fileSize,
+    statement_month: input.statementMonth,
+    count: input.count,
+    storage_path: storagePath,
+    ...(input.sha256 === undefined ? {} : { sha256: input.sha256 }),
+  };
+
+  let rows: Record<string, unknown>[];
+
+  try {
+    rows = await dbInsert<Record<string, unknown>>(
+      db,
+      "finance_import_batches",
+      [row],
+    );
+  } catch (error: unknown) {
+    // Pre-migration databases have no `sha256` column: retry once
+    // without the hash instead of failing the whole import. Any
+    // other failure propagates unchanged.
+    const message = error instanceof Error ? error.message : "";
+
+    if (input.sha256 === undefined || !/sha256/i.test(message)) {
+      throw error;
+    }
+
+    delete row.sha256;
+    rows = await dbInsert<Record<string, unknown>>(
+      db,
+      "finance_import_batches",
+      [row],
+    );
+  }
+
   const first = rows[0];
 
   if (first === undefined) {
@@ -114,6 +142,7 @@ export async function createStatementUpload(
           : new Date().toISOString(),
       statementMonth: input.statementMonth,
       count: input.count,
+      ...(input.sha256 === undefined ? {} : { sha256: input.sha256 }),
     },
     uploadUrl: signedUrl,
   };

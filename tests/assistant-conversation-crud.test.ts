@@ -178,14 +178,25 @@ describe("conversation threads CRUD", () => {
   });
 
   it("scopes deletes to the authenticated user", async () => {
-    mockPostgrest([[]]);
+    // Existence check first, then the scoped DELETE.
+    mockPostgrest([[THREAD_ROW], []]);
 
     const outcome = await handlers.remove(DB, THREAD_ID);
 
     assert.equal(outcome.ok, true);
-    assert.equal(seen[0]?.method, "DELETE");
-    assert.match(seen[0]?.url ?? "", /user_id=eq\.user-1/);
-    assert.match(seen[0]?.url ?? "", new RegExp(`id=eq\\.${THREAD_ID}`));
+    assert.equal(seen[0]?.method, "GET");
+    assert.equal(seen[1]?.method, "DELETE");
+    assert.match(seen[1]?.url ?? "", /user_id=eq\.user-1/);
+    assert.match(seen[1]?.url ?? "", new RegExp(`id=eq\\.${THREAD_ID}`));
+  });
+
+  it("reports missing threads without deleting", async () => {
+    mockPostgrest([[]]);
+
+    const outcome = await handlers.remove(DB, THREAD_ID);
+
+    assert.deepEqual(outcome, { ok: false, missing: true });
+    assert.ok(seen.every((call) => call.method !== "DELETE"));
   });
 });
 

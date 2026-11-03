@@ -16,7 +16,7 @@ import { CLOUD_ENABLED } from "./mode";
 
 export type RemoteResult<T> =
   | { ok: true; data: T }
-  | { ok: false; error: string };
+  | { ok: false; error: string; status?: number };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -78,11 +78,22 @@ export async function apiUnknown(
 
   if (!res.ok || !isRecord(parsed) || parsed.ok !== true) {
     if (res.status === 401) {
-      // Hard navigation clears all client state on session expiry.
-      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
-      window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+      // Session expiry: background reads (GET) navigate to login,
+      // but mutations report the error WITHOUT navigating so the
+      // user is not yanked out mid-edit with their input intact.
+      if (method === "GET" && typeof window !== "undefined") {
+        // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+        window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+      }
 
-      return { ok: false, error: "Sitzung abgelaufen." };
+      return {
+        ok: false,
+        error:
+          method === "GET"
+            ? "Sitzung abgelaufen."
+            : "Sitzung abgelaufen. Bitte melde dich erneut an — deine Eingabe bleibt erhalten.",
+        status: 401,
+      };
     }
 
     const message =
@@ -92,7 +103,7 @@ export async function apiUnknown(
         ? parsed.error.message
         : `Serverfehler (${res.status}).`;
 
-    return { ok: false, error: message };
+    return { ok: false, error: message, status: res.status };
   }
 
   return { ok: true, data: (parsed as { data: unknown }).data };
@@ -382,6 +393,16 @@ export function useListResource<T extends { id: string }>(
       inflight.current = false;
 
       if (!result.ok) {
+        // Delete is idempotent from the UI's view: a 404 means the
+        // row is already gone, which is the desired end state.
+        if (result.status === 404) {
+          setRemote((current) =>
+            (current ?? []).filter((entry) => entry.id !== id),
+          );
+
+          return { ok: true, data: null };
+        }
+
         setError(result.error);
 
         return result;

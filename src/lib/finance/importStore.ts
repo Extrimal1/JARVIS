@@ -20,7 +20,26 @@ export type ImportBatchMeta = {
   importedAt: string;
   statementMonth: string;
   count: number;
+  /**
+   * SHA-256 of the imported file (hex), when known. Batches imported
+   * before hashing existed carry none — matching falls back to
+   * name + size for those.
+   */
+  sha256?: string;
 };
+
+/** SHA-256 hex of file bytes; "" when WebCrypto is unavailable. */
+export async function sha256HexOf(buffer: ArrayBuffer): Promise<string> {
+  try {
+    const digest = await crypto.subtle.digest("SHA-256", buffer);
+
+    return [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+  } catch {
+    return "";
+  }
+}
 
 export const IMPORT_BATCHES_KEY = "jarvis-finance-import-batches";
 
@@ -37,7 +56,8 @@ export function isImportBatchMeta(value: unknown): value is ImportBatchMeta {
     typeof value.fileSize === "number" &&
     typeof value.importedAt === "string" &&
     typeof value.statementMonth === "string" &&
-    typeof value.count === "number"
+    typeof value.count === "number" &&
+    (value.sha256 === undefined || typeof value.sha256 === "string")
   );
 }
 
@@ -63,12 +83,33 @@ export function isCategoryCorrectionList(
   );
 }
 
-/** True when an identical file (name + byte size) was already imported. */
+/**
+ * True when an identical file was already imported. Content hash wins
+ * when both sides know it (catches renames; distinguishes same-size
+ * different files); otherwise falls back to name + byte size.
+ */
 export function alreadyImported(
   batches: ImportBatchMeta[],
   fileName: string,
   fileSize: number,
+  sha256?: string,
 ): ImportBatchMeta | null {
+  if (sha256 !== undefined && sha256 !== "") {
+    const byHash = batches.find((batch) => batch.sha256 === sha256);
+
+    if (byHash !== undefined) return byHash;
+
+    // Same name + size but a KNOWN-different hash is a different file.
+    const renamed = batches.find(
+      (batch) =>
+        batch.fileName === fileName &&
+        batch.fileSize === fileSize &&
+        (batch.sha256 === undefined || batch.sha256 === ""),
+    );
+
+    return renamed ?? null;
+  }
+
   return (
     batches.find(
       (batch) => batch.fileName === fileName && batch.fileSize === fileSize,
